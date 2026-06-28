@@ -10,16 +10,18 @@
 
 非商业爬虫平台,不追求高并发/账号池/代理池,不自动登录,不绕强风控。一个低频、轻量、可人工维护的本地自动化管道。
 
-> **v0.1 MVP** — 当前版本实现:抓取→解析→预过滤→标题链接推送。OCR/LLM/VLM 结构化提取(v0.2)、长图切片+Vision兜底(v0.3)、看板周报(v1.0)正在规划中。
+> **v0.2** — 当前版本实现:抓取→解析→预过滤→OCR+LLM 结构化提取→规则匹配→Markdown 表格日报推送。长图切片+Vision兜底(v0.3)、看板周报(v1.0)正在规划中。
 
 ---
 
-## 核心价值(v0.1)
+## 核心价值(v0.2)
 
 - **自动抓取**:定时(每日 08:30/20:30)抓取配置的公众号最新文章,限频防封
 - **智能过滤**:关键词评分门控,自动过滤实习/校招/非招聘内容
+- **结构化提取**:OCR(RapidOCR)+ 文本 LLM(DeepSeek)双路提取公司/岗位/地点/投递方式/截止日期
+- **规则匹配**:加权评分(公司/岗位关键词/地点),置信度门控,低置信度进复核区
 - **双重去重**:URL hash + 正文 hash,避免重复入库和重复推送
-- **即时推送**:飞书/钉钉 Webhook 推送每日招聘日报(标题+链接+来源)
+- **结构化日报**:Markdown 表格日报 + "需人工复核"区 + 邮箱脱敏
 - **状态可控**:状态机驱动,单篇失败不影响整批,支持断点续跑
 - **安全友好**:Cookie/Token 本地存储,配置校验,资源自动清理
 
@@ -42,14 +44,18 @@
 - 日志文件轮转(30 天保留)+ 控制台彩色输出
 - 上下文管理器确保所有 HTTP/DB 资源正确关闭
 
-### v0.2 规划中 🚧
+### v0.2 已实现 ✅
 
-- OCR(本地 RapidOCR)提取图片中文字
-- 文本 LLM 结构化提取(公司/岗位/地点/投递方式/截止日期)
+- OCR(RapidOCR) 提取图片中文字
+- 文本 LLM(DeepSeek) 结构化提取(公司/岗位/地点/投递方式/截止日期)
 - Markdown 表格日报 + "需人工复核"区
-- `wechat-article-for-ai` 适配器(URL→Markdown+图片本地化)
-- 图片感知哈希去重
-- 原始 HTML/Markdown/OCR/LLM 留档
+- 邮箱正则校验 + email_chars 一致性校验
+- 置信度门控(<60 进复核区)
+- 用户规则匹配(locations/job_keywords/companies 加权评分)
+- Provider 抽象层(OCR/LLM 接口+工厂,支持 .env 切换)
+- Prompt 模板外置
+- `extract` / `match` CLI 命令独立运行
+- run_logs 记录 llm_count/ocr_count
 
 ### v0.3+ 规划中
 
@@ -68,6 +74,7 @@
 | HTTP | `httpx` |
 | HTML 解析 | `beautifulsoup4` + `lxml` |
 | 图片处理 | `Pillow`(预留 `imagehash`) |
+| OCR | `rapidocr-onnxruntime`(v0.2) |
 | 数据校验 | `pydantic` v2 |
 | 存储 | `sqlite3`(标准库) |
 | 调度 | `apscheduler` |
@@ -84,8 +91,8 @@
 配置层 → 调度器 → fetcher → parser → prefilter → [extractor → matcher v0.2+] → storage → notifier
 ```
 
-v0.1 状态机:`discovered → fetched → parsed → candidate → notified → archived`
-错误分支:`error_fetch` / `error_parse`,预留 `error_ocr`/`error_llm`/`need_cookie`/`need_captcha`/`need_review`。
+v0.2 状态机:`discovered → fetched → parsed → candidate → extracted → validated → matched → notified → archived`
+错误分支:`error_fetch` / `error_parse` / `error_ocr` / `error_llm` / `need_cookie` / `need_captcha` / `need_review`。
 
 详细设计见 [`docs/WeHireMonitor-软件需求规格.md`](docs/WeHireMonitor-软件需求规格.md)。
 
@@ -122,6 +129,9 @@ wehire-monitor schedule
 | `wehire-monitor run --dry-run` | 干跑模式:验证配置,不写库不推送 |
 | `wehire-monitor fetch` | 仅抓取+解析+预过滤(不推送) |
 | `wehire-monitor parse` | 仅解析已入库的待处理文章 |
+| `wehire-monitor prefilter` | 仅预过滤(重新解析+评分) |
+| `wehire-monitor extract` | 仅提取(CANDIDATE 文章 → LLM 结构化岗位) |
+| `wehire-monitor match` | 仅匹配(已提取岗位 → 规则评分) |
 | `wehire-monitor notify` | 仅推送当前候选文章 |
 | `wehire-monitor check-cookie` | API 级验证 Cookie 有效性 |
 | `wehire-monitor schedule` | 启动定时调度(阻塞运行) |
@@ -152,14 +162,17 @@ wehire-monitor/
       fetcher/             # 微信公众号抓取(搜索/列表/限流/异常检测)
       parser/              # HTML 解析(BS4)、正文/图片提取
       prefilter/           # 关键词评分门控
-      notifier/            # 飞书/钉钉 Webhook 推送
-      storage/             # SQLite 仓储层(原子状态迁移)
-    domain/                # 领域模型(ArticleMeta/ParsedArticle/Status 等)
+      extractor/           # v0.2 OCR+LLM 双路提取、质量评分、后处理
+      matcher/             # v0.2 用户规则加权匹配
+      notifier/            # 飞书/钉钉 Webhook 推送(结构化 Markdown 表格)
+      storage/             # SQLite 仓储层(原子状态迁移、jobs 表)
+    providers/             # v0.2 Provider 抽象层(OCR/LLM 接口+工厂)
+    domain/                # 领域模型(ArticleMeta/ParsedArticle/Job/Status 等)
     config/                # 配置加载与校验(pydantic schema)
     infra/                 # 基础设施(限频器)
     main.py                # Typer CLI 入口
   docs/                    # 需求文档
-  tests/                   # 单元+集成测试(48 tests)
+  tests/                   # 单元+集成测试(114 tests)
   logs/                    # 日志文件(自动轮转,30天保留)
   pyproject.toml
 ```
@@ -169,7 +182,7 @@ wehire-monitor/
 | 阶段 | 目标 | 状态 |
 |---|---|---|
 | v0.1 | 能跑通:抓取→过滤→入库→推送标题链接 | ✅ 已完成 |
-| v0.2 | 能提取:OCR + 文本 LLM 结构化岗位表 + Markdown 表格日报 | 规划中 |
+| v0.2 | 能提取:OCR + 文本 LLM 结构化岗位表 + Markdown 表格日报 | ✅ 已完成 |
 | v0.3 | 能处理长图:切片 + VLM 兜底 + 预算上限 | 规划中 |
 | v1.0 | 稳定日用:看板 + 周报 + 告警 + 重跑 + 可选容器化 | 规划中 |
 
@@ -184,7 +197,8 @@ wehire-monitor/
 ## 文档
 
 - [软件需求规格说明书](docs/WeHireMonitor-软件需求规格.md)
-- [MVP 计划](docs/2026-06-28-v0.1-mvp.md)
+- [v0.1 MVP 计划](docs/plans/2026-06-28-v0.1-mvp.md)
+- [v0.2 MVP 计划](docs/plans/2026-06-28-v0.2-mvp.md)
 - [原始 PRD](docs/个人%20AI%20招聘情报监控平台%20PRD.md)
 
 ## 参考项目
