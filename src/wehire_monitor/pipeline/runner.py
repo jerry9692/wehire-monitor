@@ -2,14 +2,28 @@
 
 状态机推进:fetcher → parser → prefilter → notifier
 - 生成 run_id,写 run_logs
-- dry-run 模式:只读不推不写
+- dry-run 模式:走完全流程但不写库不推送(如果有已入库文章会处理但不推送)
 - 单篇失败不影响整批
+- 资源安全:支持上下文管理器,所有 HTTP 客户端/DB 连接正确关闭
+- 配置校验:启动时检查必要配置项
+- 去重:URL hash + content hash 双重去重
+- 全局文章数限制:遵守 max_articles_per_run
 """
+import hashlib
+import json
 import os
+import sys
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 from loguru import logger
+
+try:
+    from zoneinfo import ZoneInfo
+    _TZ = ZoneInfo("Asia/Shanghai")
+except ImportError:
+    _TZ = None
 
 from wehire_monitor.config.loader import ConfigLoader
 from wehire_monitor.config.schemas import AccountConfig, RulesConfig
@@ -21,135 +35,291 @@ from wehire_monitor.modules.fetcher.exceptions import (
     CaptchaRequiredError,
     AccountNotFoundError,
 )
-from wehire_monitor.modules.notifier.notifier import Notifier, DailyReport, ReportItem
+from wehire_monitor.modules.notifier.notifier import (
+    Notifier,
+    DailyReport,
+    ReportItem,
+    NotifyResult,
+)
 from wehire_monitor.modules.parser.parser import Parser
 from wehire_monitor.modules.prefilter.prefilter import Prefilter
 from wehire_monitor.modules.storage.repository import Repository
 
+# 项目根目录
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+
+
+def _url_hash(url: str) -> str:
+    return hashlib.sha256(url.encode()).hexdigest()
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _today_str() -> str:
+    if _TZ:
+        return datetime.now(_TZ).strftime("%Y-%m-%d")
+    return datetime.now().strftime("%Y-%m-%d")
+
 
 class PipelineRunner:
-    """管道编排器"""
+    """管道编排器(支持上下文管理器确保资源关闭)"""
 
     def __init__(
         self,
         db_path: str = "data/job_intel.sqlite",
+        config_dir: str | None = None,
         accounts_path: str | None = None,
         rules_path: str | None = None,
         data_dir: str = "data",
         dry_run: bool = False,
+        stages: set[str] | None = None,
     ):
+        """
+        Args:
+            stages: 要执行的阶段集合,如 {"fetch","parse","notify"}。None 表示全部阶段。
+        """
         self.dry_run = dry_run
+        self.stages = stages or {"fetch", "parse", "prefilter", "notify"}
         self.config_loader = ConfigLoader(
+            config_dir=config_dir,
             accounts_path=accounts_path,
             rules_path=rules_path,
         )
 
+        # 解析路径为绝对路径(相对于项目根目录)
+        self._resolve_paths(db_path, data_dir, config_dir)
+
+        # 确保数据目录存在
+        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(self.data_dir).mkdir(parents=True, exist_ok=True)
+
         # 初始化仓库
-        self.repo = Repository(db_path)
+        self.repo = Repository(self.db_path)
         self.repo.init_db()
 
         # 生成 run_id
         self.run_id = f"run-{uuid.uuid4().hex[:8]}"
-        self.started_at = datetime.now(timezone.utc).isoformat()
+        self.started_at = _now_iso()
 
-        # 初始化模块(延迟初始化 fetcher,需要 Cookie)
-        self.parser = Parser(data_dir=data_dir)
+        # 加载配置
         self.keywords = self.config_loader.load_keywords()
         self.prefilter = Prefilter(self.keywords)
         self.rules = self.config_loader.load_rules()
 
-        feishu_hook = os.environ.get("FEISHU_WEBHOOK")
-        dingtalk_hook = os.environ.get("DINGTALK_WEBHOOK")
+        # 初始化模块(延迟初始化 fetcher,需要 Cookie)
+        self.parser = Parser(
+            data_dir=self.data_dir,
+            user_agent=self.config_loader.get_user_agent(),
+        )
+
+        feishu_hook = self.config_loader.get_feishu_webhook()
+        dingtalk_hook = self.config_loader.get_dingtalk_webhook()
         self.notifier = Notifier(
-            feishu_webhook=feishu_hook,
-            dingtalk_webhook=dingtalk_hook,
+            feishu_webhook=feishu_hook or None,
+            dingtalk_webhook=dingtalk_hook or None,
             max_per_run=self.rules.notify.max_per_run,
             push_when_empty=self.rules.notify.push_when_empty,
+            email_mask=self.rules.notify.email_mask,
         )
 
         self.fetcher: Fetcher | None = None
+
+        # 非 dry-run 模式下校验必要配置
+        if not self.dry_run and "fetch" in self.stages:
+            missing = self.config_loader.validate_required_config()
+            if missing:
+                logger.error(f"缺少必要配置项: {', '.join(missing)}")
+                logger.error("请在 config/.env 中配置后重试")
+                sys.exit(1)
+
+    def _resolve_paths(self, db_path: str, data_dir: str, config_dir: str | None) -> None:
+        """将相对路径解析为基于项目根目录的绝对路径"""
+        # db_path
+        p = Path(db_path)
+        self.db_path = str(p) if p.is_absolute() else str(_PROJECT_ROOT / db_path)
+        # data_dir
+        p = Path(data_dir)
+        self.data_dir = str(p) if p.is_absolute() else str(_PROJECT_ROOT / data_dir)
+
+    def __enter__(self) -> "PipelineRunner":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """关闭所有资源"""
+        try:
+            if self.fetcher is not None:
+                self.fetcher.close()
+                self.fetcher = None
+        except Exception:
+            pass
+        try:
+            self.parser.close()
+        except Exception:
+            pass
+        try:
+            self.notifier.close()
+        except Exception:
+            pass
+        try:
+            self.repo.close()
+        except Exception:
+            pass
 
     def _init_fetcher(self) -> Fetcher:
         """延迟初始化 Fetcher(需要 Cookie)"""
         cookie = self.config_loader.get_cookie()
         token = self.config_loader.get_token()
         ua = self.config_loader.get_user_agent()
+        if not cookie or not token:
+            raise CookieInvalidError(
+                "WECHAT_MP_COOKIE 或 WECHAT_MP_TOKEN 未配置,请在 config/.env 中设置"
+            )
         return Fetcher(cookie=cookie, token=token, user_agent=ua)
 
     def run(self) -> None:
         """执行完整管道"""
-        logger.info(f"=== 开始运行 {self.run_id} (dry_run={self.dry_run}) ===")
+        stages_str = ",".join(sorted(self.stages))
+        logger.info(f"=== 开始运行 {self.run_id} (dry_run={self.dry_run}, stages={stages_str}) ===")
         self.repo.log_run(self.run_id, self.started_at)
 
-        # Cookie 检测
-        if self.config_loader.is_cookie_stale():
-            logger.warning("Cookie 已过期,请手动更新!")
-            if not self.dry_run:
-                self._notify_cookie_expired()
-            self.repo.update_run(
-                self.run_id,
-                ended_at=datetime.now(timezone.utc).isoformat(),
-                error_summary="Cookie expired",
-            )
-            return
-
-        # 抓取
-        if self.dry_run:
-            logger.info("dry-run 模式:跳过实际抓取")
-            self.repo.update_run(
-                self.run_id,
-                ended_at=datetime.now(timezone.utc).isoformat(),
-            )
-            return
-
-        self.fetcher = self._init_fetcher()
-        accounts = self.config_loader.load_accounts()
+        fetched_count = 0
+        candidate_count = 0
+        error_summary: str | None = None
+        fatal_error = False
         all_articles: list[ArticleMeta] = []
 
-        for account in accounts:
-            if not account.enabled:
-                continue
-            try:
-                all_articles.extend(self._fetch_account(account))
-            except (CookieInvalidError, CaptchaRequiredError) as e:
-                logger.error(f"致命错误,停止抓取: {e}")
-                self._notify_cookie_expired()
-                break
-            except Exception as e:
-                logger.error(f"公众号 {account.name} 抓取失败: {e}")
-                continue
+        # ========== 阶段1: 抓取 ==========
+        if "fetch" in self.stages and not self.dry_run:
+            result = self._do_fetch()
+            if result["fatal"]:
+                error_summary = result["error"]
+                fatal_error = True
+            else:
+                all_articles = result["articles"]
+                fetched_count = len(all_articles)
+        elif self.dry_run:
+            logger.info("dry-run 模式:跳过 HTTP 抓取")
+            # dry-run 模式下加载已入库的待处理文章(DISCOVERED/FETCHED/PARSED)继续后续阶段
+            pending = self.repo.query_pending_articles()
+            if pending:
+                logger.info(f"dry-run:发现 {len(pending)} 篇待处理文章,继续解析/预过滤")
+                for row in pending:
+                    all_articles.append(ArticleMeta(
+                        account_name=row["account_name"],
+                        title=row["title"],
+                        url=row["url"],
+                        publish_time=datetime.fromisoformat(row["publish_time"]),
+                    ))
+            else:
+                logger.info("dry-run:无待处理文章,仅验证配置")
 
-        # 处理文章
-        self._process_articles(all_articles)
+        if not fatal_error:
+            # ========== 阶段2: 解析 + 预过滤 ==========
+            if "parse" in self.stages or "prefilter" in self.stages:
+                candidate_count = self._process_articles(all_articles)
 
-        # 推送
-        self._notify()
+            # ========== 阶段3: 推送 ==========
+            if "notify" in self.stages:
+                self._notify(candidate_count, fetched_count)
 
         # 更新运行日志
         self.repo.update_run(
             self.run_id,
-            ended_at=datetime.now(timezone.utc).isoformat(),
-            fetched_count=len(all_articles),
+            ended_at=_now_iso(),
+            fetched_count=fetched_count,
+            candidate_count=candidate_count,
+            error_summary=error_summary,
         )
-        logger.info(f"=== 运行结束 {self.run_id} ===")
+        logger.info(
+            f"=== 运行结束 {self.run_id}: fetched={fetched_count}, candidates={candidate_count} ==="
+        )
+
+    def _do_fetch(self) -> dict:
+        """执行抓取阶段,返回 {articles, fatal, error}"""
+        # Cookie 过期检测(基于时间)
+        if self.config_loader.is_cookie_stale():
+            logger.warning("Cookie 已过期,请手动更新!")
+            self.notifier.send_alert(
+                "Cookie 过期提醒",
+                "WECHAT_MP_COOKIE 已超过 24 小时未更新,请手动更新 Cookie 和 Token 后重试。",
+            )
+            return {"articles": [], "fatal": True, "error": "Cookie expired"}
+
+        try:
+            self.fetcher = self._init_fetcher()
+        except CookieInvalidError as e:
+            logger.error(str(e))
+            return {"articles": [], "fatal": True, "error": str(e)}
+
+        accounts = self.config_loader.load_accounts()
+        # 按 priority 排序:high > medium > low
+        priority_order = {"high": 0, "medium": 1, "low": 2}
+        accounts.sort(key=lambda a: priority_order.get(a.priority, 1))
+
+        all_articles: list[ArticleMeta] = []
+        max_total = self.rules.schedule.max_articles_per_run
+        error = None
+        fatal = False
+
+        for account in accounts:
+            if not account.enabled:
+                continue
+            if len(all_articles) >= max_total:
+                logger.info(f"已达全局上限 {max_total} 篇,停止抓取")
+                break
+            try:
+                new_articles = self._fetch_account(account)
+                all_articles.extend(new_articles)
+                # 全局数量限制
+                if len(all_articles) >= max_total:
+                    all_articles = all_articles[:max_total]
+                    logger.info(f"已达全局上限 {max_total} 篇,截断")
+                    break
+            except (CookieInvalidError, CaptchaRequiredError) as e:
+                logger.error(f"致命错误,停止抓取: {e}")
+                self.notifier.send_alert("Cookie/验证码错误", str(e))
+                error = str(e)
+                fatal = True
+                break
+            except AccountNotFoundError as e:
+                logger.warning(f"公众号未找到,跳过: {e}")
+                continue
+            except Exception as e:
+                logger.error(f"公众号 {account.name} 抓取失败: {e}")
+                continue
+
+        return {"articles": all_articles, "fatal": fatal, "error": error}
 
     def _fetch_account(self, account: AccountConfig) -> list[ArticleMeta]:
         """抓取单个公众号"""
         assert self.fetcher is not None
-        logger.info(f"抓取公众号: {account.name}")
-        account_meta = self.fetcher.search_account(account.name, account.alias)
+        logger.info(f"抓取公众号: {account.name} (priority={account.priority})")
+        account_meta = self.fetcher.search_account(
+            account.name,
+            account.alias,
+            max_articles=self.rules.schedule.max_articles_per_account,
+        )
         articles = self.fetcher.list_articles(
-            account_meta, window_hours=self.rules.schedule.window_hours
+            account_meta,
+            window_hours=self.rules.schedule.window_hours,
+            max_count=self.rules.schedule.max_articles_per_account,
         )
 
-        # URL 去重 + 入库
+        # URL 去重 + content_hash 去重
         new_articles: list[ArticleMeta] = []
+        seen_hashes: set[str] = set()
         for a in articles:
-            import hashlib
-            url_hash = hashlib.sha256(a.url.encode()).hexdigest()
+            url_hash = _url_hash(a.url)
             if self.repo.is_url_seen(url_hash):
                 logger.debug(f"URL 已存在,跳过: {a.title}")
                 continue
+            # content_hash 去重需要先解析,这里只做 URL 级别
+            # (content_hash 去重在 _process_articles 解析后进行)
             if not self.dry_run:
                 self.repo.upsert_article(
                     article_id=url_hash,
@@ -161,20 +331,54 @@ class PipelineRunner:
                 )
             new_articles.append(a)
 
+        logger.info(f"公众号 {account.name}: 新增 {len(new_articles)} 篇")
         return new_articles
 
-    def _process_articles(self, articles: list[ArticleMeta]) -> None:
-        """解析 + 预过滤"""
-        import hashlib
+    def _process_articles(self, articles: list[ArticleMeta]) -> int:
+        """解析 + 预过滤,返回 candidate 数量"""
+        candidate_count = 0
+        seen_content_hashes: set[str] = set()
 
         for meta in articles:
-            url_hash = hashlib.sha256(meta.url.encode()).hexdigest()
+            url_hash = _url_hash(meta.url)
+            article = None
             try:
-                # 解析
-                parsed = self.parser.parse(meta)
+                # 先标记 DISCOVERED → FETCHED(HTML 下载开始)
                 if not self.dry_run:
-                    self.repo.transition(url_hash, Status.DISCOVERED, Status.FETCHED)
-                    self.repo.transition(url_hash, Status.FETCHED, Status.PARSED)
+                    article = self.repo.get_article(url_hash)
+                    if article and article["status"] == Status.DISCOVERED.value:
+                        try:
+                            self.repo.transition(url_hash, Status.DISCOVERED, Status.FETCHED)
+                        except ValueError:
+                            self.repo.force_status(url_hash, Status.FETCHED)
+
+                # 解析(包含 HTML 下载)
+                parsed = self.parser.parse(meta)
+
+                # content_hash 去重
+                if not self.dry_run and parsed.content_hash:
+                    if parsed.content_hash in seen_content_hashes:
+                        logger.info(f"内容重复,跳过: {meta.title}")
+                        self.repo.force_status(url_hash, Status.ARCHIVED)
+                        continue
+                    # 检查 DB 中是否已有相同 content_hash
+                    existing = self.repo.conn.execute(
+                        "SELECT id FROM articles WHERE content_hash = ? AND id != ?",
+                        (parsed.content_hash, url_hash),
+                    ).fetchone()
+                    if existing:
+                        logger.info(f"内容与已有文章重复(hash={parsed.content_hash[:8]}),跳过: {meta.title}")
+                        self.repo.force_status(url_hash, Status.ARCHIVED)
+                        continue
+                    seen_content_hashes.add(parsed.content_hash)
+
+                if not self.dry_run:
+                    current = self.repo.get_article(url_hash)
+                    if current and current["status"] == Status.FETCHED.value:
+                        try:
+                            self.repo.transition(url_hash, Status.FETCHED, Status.PARSED)
+                        except ValueError:
+                            self.repo.force_status(url_hash, Status.PARSED)
                     self.repo.upsert_article(
                         article_id=url_hash,
                         account_name=meta.account_name,
@@ -188,8 +392,22 @@ class PipelineRunner:
                 # 预过滤
                 pf_result = self.prefilter.score(parsed)
                 if not self.dry_run:
+                    reasons_json = json.dumps(pf_result.reasons, ensure_ascii=False)
                     if pf_result.decision == "ignore":
                         self.repo.transition(url_hash, Status.PARSED, Status.IGNORED)
+                        # IGNORED 直接归档,避免数据膨胀(但保留 prefilter_reasons 用于调试)
+                        self.repo.upsert_article(
+                            article_id=url_hash,
+                            account_name=meta.account_name,
+                            title=meta.title,
+                            url=meta.url,
+                            publish_time=meta.publish_time.isoformat(),
+                            status=Status.IGNORED,
+                            content_hash=parsed.content_hash,
+                            prefilter_score=pf_result.score,
+                            prefilter_reasons=reasons_json,
+                        )
+                        self.repo.transition(url_hash, Status.IGNORED, Status.ARCHIVED)
                     else:
                         self.repo.transition(url_hash, Status.PARSED, Status.CANDIDATE)
                         self.repo.upsert_article(
@@ -199,19 +417,37 @@ class PipelineRunner:
                             url=meta.url,
                             publish_time=meta.publish_time.isoformat(),
                             status=Status.CANDIDATE,
+                            content_hash=parsed.content_hash,
                             prefilter_score=pf_result.score,
-                            prefilter_reasons=str(pf_result.reasons),
+                            prefilter_reasons=reasons_json,
                         )
+                        candidate_count += 1
+                else:
+                    # dry-run 模式只打印结果
+                    decision = pf_result.decision
+                    logger.info(
+                        f"[dry-run] {meta.account_name} | {meta.title} | "
+                        f"score={pf_result.score} | decision={decision}"
+                    )
+                    if decision != "ignore":
+                        candidate_count += 1
 
             except Exception as e:
                 logger.error(f"文章处理失败: {meta.title} — {e}")
                 if not self.dry_run:
+                    article = self.repo.get_article(url_hash)
+                    current_status = article["status"] if article else None
                     try:
-                        self.repo.transition(url_hash, Status.FETCHED, Status.ERROR_PARSE)
-                    except ValueError:
-                        pass  # 状态不匹配时忽略
+                        if current_status == Status.DISCOVERED.value:
+                            self.repo.force_status(url_hash, Status.ERROR_FETCH)
+                        else:
+                            self.repo.force_status(url_hash, Status.ERROR_PARSE)
+                    except Exception as mark_err:
+                        logger.error(f"标记错误状态失败: {mark_err}")
 
-    def _notify(self) -> None:
+        return candidate_count
+
+    def _notify(self, candidate_count: int, fetched_count: int) -> None:
         """推送日报"""
         if self.dry_run:
             logger.info("dry-run 模式:跳过推送")
@@ -228,32 +464,46 @@ class PipelineRunner:
         ]
 
         report = DailyReport(
-            date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            date=_today_str(),
             items=items,
-            total_fetched=len(self.repo.query_by_status(Status.ARCHIVED))
-            + len(candidates)
-            + len(self.repo.query_by_status(Status.IGNORED)),
-            total_candidates=len(candidates),
+            total_fetched=fetched_count,
+            total_candidates=candidate_count,
         )
 
-        result = self.notifier.send_daily(report)
-        if result.success:
-            # 标记已通知
-            for c in candidates:
-                self.repo.transition(c["id"], Status.CANDIDATE, Status.NOTIFIED)
-                self.repo.transition(c["id"], Status.NOTIFIED, Status.ARCHIVED)
-            logger.info(f"推送成功: {len(items)} 条")
+        result: NotifyResult = self.notifier.send_daily(report)
+        if result.success and result.pushed_count > 0:
+            pushed = candidates[: result.pushed_count]
+            for c in pushed:
+                try:
+                    self.repo.transition(c["id"], Status.CANDIDATE, Status.NOTIFIED)
+                    self.repo.transition(c["id"], Status.NOTIFIED, Status.ARCHIVED)
+                except ValueError as e:
+                    logger.warning(f"归档失败: {c['title']} — {e}")
+            remaining = len(candidates) - result.pushed_count
+            logger.info(
+                f"推送成功: 展示 {result.pushed_count} 条, 剩余 {remaining} 条留待下次"
+            )
+        elif result.success and result.pushed_count == 0 and not items:
+            logger.info("无候选文章,跳过推送")
         else:
             logger.error(f"推送失败: {result.message}")
 
-    def _notify_cookie_expired(self) -> None:
-        """推送 Cookie 失效提醒"""
-        report = DailyReport(
-            date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-            items=[],
-            total_fetched=0,
-            total_candidates=0,
-        )
-        # 构建特殊提醒
-        self.notifier._send_feishu("⚠️ Cookie 已过期,请手动更新 WECHAT_MP_COOKIE 和 WECHAT_MP_TOKEN!")
-        self.notifier._send_dingtalk("⚠️ Cookie 已过期,请手动更新 WECHAT_MP_COOKIE 和 WECHAT_MP_TOKEN!")
+    def check_cookie(self) -> bool:
+        """检查 Cookie 有效性(调用微信 API 验证)"""
+        try:
+            self.fetcher = self._init_fetcher()
+        except CookieInvalidError as e:
+            logger.error(str(e))
+            return False
+
+        try:
+            status = self.fetcher.check_cookie()
+            if status.is_valid:
+                logger.info(f"Cookie 有效 (昵称: {status.nickname or '未知'})")
+                return True
+            else:
+                logger.error(f"Cookie 无效: {status.message}")
+                return False
+        except Exception as e:
+            logger.error(f"Cookie 检查失败: {e}")
+            return False

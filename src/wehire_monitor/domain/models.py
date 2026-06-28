@@ -1,5 +1,5 @@
 """领域模型"""
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
@@ -10,7 +10,7 @@ class ArticleMeta:
     account_name: str
     title: str
     url: str
-    publish_time: datetime
+    publish_time: datetime  # 必须是 timezone-aware datetime
     source: Literal["wechat_mp_backend"] = "wechat_mp_backend"
 
 
@@ -37,6 +37,14 @@ class ParsedArticle:
 
 
 @dataclass
+class PrefilterResult:
+    """预过滤结果"""
+    score: int
+    reasons: list[str]
+    decision: Literal["extract", "ocr_review", "ignore"]
+
+
+@dataclass
 class CookieStatus:
     """Cookie 有效性状态"""
     is_valid: bool
@@ -52,4 +60,17 @@ class RunLog:
     ended_at: str | None = None
     fetched_count: int = 0
     candidate_count: int = 0
+    ocr_count: int = 0
+    llm_count: int = 0
+    vlm_count: int = 0
+    cost_estimate: float = 0.0
     error_summary: str | None = None
+
+
+@dataclass
+class FetchResult:
+    """抓取结果"""
+    articles: list[ArticleMeta]
+    error_accounts: list[str]
+    cookie_expired: bool = False
+    captcha_required: bool = False

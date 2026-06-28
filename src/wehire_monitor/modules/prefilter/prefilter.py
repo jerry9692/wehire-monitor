@@ -3,19 +3,20 @@
 评分公式(承接 spec §4.3):
     招聘分 = 标题命中*40 + 正文命中*30 + 投递词命中*20 + 邮箱/报名链接命中*10 - 排除词惩罚
 
+强排除规则:
+    标题命中强排除词(如"校招""实习") → 直接 ignore(一票否决)
+
 门控:
     score >= 50 → extract
     30 <= score < 50 → ocr_review
     score < 30 → ignore
 """
 import re
-from dataclasses import dataclass
-from typing import Literal
 
 from loguru import logger
 
 from wehire_monitor.config.schemas import KeywordsConfig
-from wehire_monitor.domain.models import ParsedArticle
+from wehire_monitor.domain.models import ParsedArticle, PrefilterResult
 
 # 投递相关词
 _DELIVERY_WORDS = ["投递", "报名", "邮箱", "应聘", "简历投递", "邮件"]
@@ -25,13 +26,8 @@ _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 # 报名链接正则
 _URL_RE = re.compile(r"https?://[^\s]+")
 
-
-@dataclass
-class PrefilterResult:
-    """预过滤结果"""
-    score: int
-    reasons: list[str]
-    decision: Literal["extract", "ocr_review", "ignore"]
+# 标题强排除词(一票否决)
+_TITLE_STRONG_EXCLUDE = ["校招", "校园招聘", "实习生", "实习招聘", "宣讲会", "培训班"]
 
 
 class Prefilter:
@@ -40,6 +36,10 @@ class Prefilter:
     def __init__(self, keywords: KeywordsConfig):
         self.hit_words = keywords.strong_hit
         self.exclude_words = keywords.strong_exclude
+        # 标题强排除词(一票否决):内置默认 + 用户配置的 strong_exclude
+        self.title_veto_words = list(dict.fromkeys(
+            _TITLE_STRONG_EXCLUDE + keywords.strong_exclude
+        ))
 
     def score(self, article: ParsedArticle) -> PrefilterResult:
         """计算招聘分并决定门控"""
@@ -49,6 +49,13 @@ class Prefilter:
         title = article.title
         text = article.plain_text
         text_head = text[:1000]  # 正文前 1000 字
+
+        # 强排除:标题命中强排除词 → 直接 ignore(一票否决)
+        title_exclude_veto = [w for w in self.title_veto_words if w in title]
+        if title_exclude_veto:
+            reasons.append(f"标题强排除(一票否决): {', '.join(title_exclude_veto)}")
+            logger.debug(f"预过滤: {article.title} → score=0(veto), decision=ignore")
+            return PrefilterResult(score=0, reasons=reasons, decision="ignore")
 
         # 标题命中 * 40
         title_hits = [w for w in self.hit_words if w in title]
@@ -79,7 +86,7 @@ class Prefilter:
                 reasons.append("正文包含链接")
 
         # 排除词惩罚(每个 -15)
-        exclude_hits = [w for w in self.exclude_words if w in title or w in text_head]
+        exclude_hits = [w for w in self.exclude_words if (w in title) or (w in text_head)]
         for w in exclude_hits:
             score -= 15
             reasons.append(f"排除词命中: {w}")

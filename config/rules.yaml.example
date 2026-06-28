@@ -1,3 +1,4 @@
+# 匹配规则(v0.2 启用结构化匹配,v0.1 仅作参考)
 match_rules:
   locations:
     include: ["上海", "杭州", "苏州"]
@@ -9,13 +10,20 @@ match_rules:
     include: ["银行", "证券", "基金", "国企", "央企"]
   notify_min_score: 70
 
+# 通知配置
 notify:
-  max_per_run: 20
-  push_when_empty: false
-  email_mask: true
+  max_per_run: 20          # 单次推送最多展示条数
+  push_when_empty: false   # 无命中时是否推送空日报
+  email_mask: true         # 邮箱脱敏显示(v0.2)
 
+# 调度配置
 schedule:
-  daily_at: ["08:30", "20:30"]
-  window_hours: 36
-  max_articles_per_run: 80
-  max_articles_per_account: 10
+  daily_at: ["08:30", "20:30"]  # 每日执行时间(Asia/Shanghai)
+  window_hours: 36              # 回溯时间窗口(小时)
+  max_articles_per_run: 80      # 单次全局最大文章数
+  max_articles_per_account: 10  # 单号单次最大文章数
+
+# 预算配置(v0.2 启用 LLM/VLM 后使用)
+budget:
+  daily_vlm_budget_cny: 5.0    # 每日 VLM 预算(元)
+  max_slices_per_article: 8    # 单篇文章最大切片数

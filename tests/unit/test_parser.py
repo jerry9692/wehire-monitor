@@ -28,11 +28,13 @@ def test_parse_extracts_title_and_text():
         publish_time=datetime(2026, 6, 28, tzinfo=timezone.utc),
     )
     parser = Parser(data_dir="/tmp/wehire_test")
-    with patch.object(parser, "_fetch_html", return_value=SAMPLE_HTML):
+    with patch.object(parser, "_fetch_html", return_value=SAMPLE_HTML), \
+         patch.object(parser, "_download_image", return_value=("/tmp/img.jpg", 800, 600, "sha256abc")):
         result = parser.parse(meta)
     assert result.title == "招聘公告"
     assert "数据分析师" in result.plain_text
     assert "hr@example.com" in result.plain_text
+    parser.close()
 
 
 def test_parse_extracts_images():
@@ -49,6 +51,7 @@ def test_parse_extracts_images():
     assert len(result.images) == 2
     assert result.images[0].url == "https://mmbiz.qpic.cn/test1.jpg"
     assert result.images[1].url == "https://mmbiz.qpic.cn/test2.jpg"
+    parser.close()
 
 
 def test_parse_article_id_is_url_hash():
@@ -60,9 +63,11 @@ def test_parse_article_id_is_url_hash():
     )
     expected_id = hashlib.sha256(meta.url.encode()).hexdigest()
     parser = Parser(data_dir="/tmp/wehire_test")
-    with patch.object(parser, "_fetch_html", return_value=SAMPLE_HTML):
+    with patch.object(parser, "_fetch_html", return_value=SAMPLE_HTML), \
+         patch.object(parser, "_download_image", return_value=("/tmp/img.jpg", 800, 600, "sha256abc")):
         result = parser.parse(meta)
     assert result.article_id == expected_id
+    parser.close()
 
 
 def test_parse_content_hash_is_deterministic():
@@ -78,3 +83,4 @@ def test_parse_content_hash_is_deterministic():
         result1 = parser.parse(meta)
         result2 = parser.parse(meta)
     assert result1.content_hash == result2.content_hash
+    parser.close()

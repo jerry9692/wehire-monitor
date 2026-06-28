@@ -74,7 +74,7 @@ def test_transition_wrong_from_raises(tmp_db_path):
         status=Status.DISCOVERED,
     )
     import pytest
-    with pytest.raises(ValueError, match="状态迁移不匹配"):
+    with pytest.raises(ValueError, match="状态迁移失败"):
         repo.transition("hash001", Status.FETCHED, Status.PARSED)
 
 

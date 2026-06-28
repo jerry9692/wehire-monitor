@@ -27,8 +27,8 @@ venv/
 env/
 ENV/
 
-# uv
-uv.lock
+# uv (提交 lockfile 保证可重现构建)
+# uv.lock 已提交,不忽略
 
 # Testing / coverage
 .pytest_cache/
@@ -56,6 +56,9 @@ coverage.xml
 .DS_Store
 
 # Project secrets & runtime data (never commit)
+.env
+.env.*
+!.env.example
 config/.env
 config/.env.*
 !config/.env.example
@@ -73,6 +76,8 @@ logs/
 # Local SQLite
 *.sqlite
 *.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
 *.db
 
 # OS

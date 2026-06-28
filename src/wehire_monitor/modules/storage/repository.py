@@ -10,20 +10,46 @@ from wehire_monitor.domain.status import Status
 
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
+# 允许更新的 run_logs 列(白名单,防止 SQL 注入)
+_RUN_UPDATE_COLUMNS = {
+    "ended_at", "fetched_count", "candidate_count",
+    "ocr_count", "llm_count", "vlm_count",
+    "cost_estimate", "error_summary",
+}
+
 
 class Repository:
-    """SQLite 数据访问层"""
+    """SQLite 数据访问层(支持上下文管理器)"""
 
     def __init__(self, db_path: str):
         self.db_path = db_path
         self._conn: sqlite3.Connection | None = None
+        # 确保父目录存在
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
     @property
     def conn(self) -> sqlite3.Connection:
         if self._conn is None:
             self._conn = sqlite3.connect(self.db_path)
             self._conn.row_factory = sqlite3.Row
+            # 启用外键约束 + WAL 模式 + 超时
+            self._conn.execute("PRAGMA foreign_keys = ON")
+            self._conn.execute("PRAGMA journal_mode = WAL")
+            self._conn.execute("PRAGMA busy_timeout = 5000")
+            self._conn.execute("PRAGMA synchronous = NORMAL")
         return self._conn
+
+    def __enter__(self) -> "Repository":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def init_db(self) -> None:
         """初始化数据库(建表)"""
@@ -62,6 +88,7 @@ class Repository:
                                    markdown_path, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
+                account_name=excluded.account_name,
                 title=excluded.title,
                 status=excluded.status,
                 content_hash=excluded.content_hash,
@@ -95,26 +122,51 @@ class Repository:
     def transition(
         self, article_id: str, from_status: Status, to_status: Status
     ) -> None:
-        """状态迁移(带 from 校验)"""
-        article = self.get_article(article_id)
-        if article is None:
-            raise ValueError(f"文章不存在: {article_id}")
-        if article["status"] != from_status.value:
+        """原子状态迁移(WHERE 同时校验 id 和 from_status,避免 TOCTOU)"""
+        now = datetime.now(timezone.utc).isoformat()
+        cursor = self.conn.execute(
+            "UPDATE articles SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
+            (to_status.value, now, article_id, from_status.value),
+        )
+        self.conn.commit()
+        if cursor.rowcount == 0:
+            # 查询当前状态以给出更准确的错误
+            article = self.get_article(article_id)
+            current = article["status"] if article else "NOT_FOUND"
             raise ValueError(
-                f"状态迁移不匹配: 期望 {from_status.value}, 实际 {article['status']}"
+                f"状态迁移失败: 文章 {article_id[:8]} 当前状态={current}, "
+                f"期望 from={from_status.value}, 目标 to={to_status.value}"
             )
+        logger.debug(f"文章 {article_id[:8]} 状态: {from_status.value} → {to_status.value}")
+
+    def force_status(self, article_id: str, to_status: Status) -> None:
+        """强制设置状态(不校验 from_status,用于错误处理)"""
         now = datetime.now(timezone.utc).isoformat()
         self.conn.execute(
             "UPDATE articles SET status = ?, updated_at = ? WHERE id = ?",
             (to_status.value, now, article_id),
         )
         self.conn.commit()
-        logger.debug(f"文章 {article_id} 状态: {from_status.value} → {to_status.value}")
+        logger.debug(f"文章 {article_id[:8]} 强制状态 → {to_status.value}")
 
     def query_by_status(self, status: Status) -> list[dict[str, Any]]:
         cursor = self.conn.execute(
             "SELECT * FROM articles WHERE status = ? ORDER BY created_at",
             (status.value,),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def query_pending_articles(self) -> list[dict[str, Any]]:
+        """查询所有处于中间状态的文章(支持断点续跑)"""
+        pending_statuses = (
+            Status.DISCOVERED.value,
+            Status.FETCHED.value,
+            Status.PARSED.value,
+        )
+        placeholders = ",".join("?" * len(pending_statuses))
+        cursor = self.conn.execute(
+            f"SELECT * FROM articles WHERE status IN ({placeholders}) ORDER BY created_at",
+            pending_statuses,
         )
         return [dict(row) for row in cursor.fetchall()]
 
@@ -125,30 +177,15 @@ class Repository:
         )
         self.conn.commit()
 
-    def update_run(
-        self,
-        run_id: str,
-        ended_at: str | None = None,
-        fetched_count: int | None = None,
-        candidate_count: int | None = None,
-        error_summary: str | None = None,
-    ) -> None:
-        sets = []
-        params: list[Any] = []
-        if ended_at is not None:
-            sets.append("ended_at = ?")
-            params.append(ended_at)
-        if fetched_count is not None:
-            sets.append("fetched_count = ?")
-            params.append(fetched_count)
-        if candidate_count is not None:
-            sets.append("candidate_count = ?")
-            params.append(candidate_count)
-        if error_summary is not None:
-            sets.append("error_summary = ?")
-            params.append(error_summary)
-        if not sets:
+    def update_run(self, run_id: str, **kwargs: Any) -> None:
+        """更新 run_logs,仅允许白名单列"""
+        if not kwargs:
             return
+        valid_items = [(k, v) for k, v in kwargs.items() if k in _RUN_UPDATE_COLUMNS]
+        if not valid_items:
+            return
+        sets = [f"{k} = ?" for k, _ in valid_items]
+        params = [v for _, v in valid_items]
         params.append(run_id)
         self.conn.execute(
             f"UPDATE run_logs SET {', '.join(sets)} WHERE run_id = ?",
@@ -165,5 +202,8 @@ class Repository:
 
     def close(self) -> None:
         if self._conn:
-            self._conn.close()
+            try:
+                self._conn.close()
+            except Exception:
+                pass
             self._conn = None

@@ -19,23 +19,26 @@ CREATE TABLE IF NOT EXISTS articles (
 );
 CREATE INDEX IF NOT EXISTS idx_articles_status ON articles(status);
 CREATE INDEX IF NOT EXISTS idx_articles_publish_time ON articles(publish_time);
+CREATE INDEX IF NOT EXISTS idx_articles_content_hash ON articles(content_hash);
 
 CREATE TABLE IF NOT EXISTS jobs (
   id TEXT PRIMARY KEY,
   article_id TEXT NOT NULL REFERENCES articles(id),
-  company_name TEXT,
-  job_name TEXT,
-  location TEXT,
+  company_name TEXT NOT NULL DEFAULT '',
+  job_name TEXT NOT NULL DEFAULT '',
+  location TEXT NOT NULL DEFAULT '',
   apply_channel TEXT,
   email TEXT,
-  deadline_date TEXT,
-  deadline_inferred INTEGER,
-  confidence INTEGER,
-  match_score INTEGER,
+  email_chars TEXT,
+  deadline_date TEXT NOT NULL DEFAULT '',
+  deadline_inferred INTEGER DEFAULT 0,
+  confidence INTEGER DEFAULT 0,
+  match_score INTEGER DEFAULT 0,
   source_evidence TEXT,
   warnings TEXT,
   notified_at TEXT,
   created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
   UNIQUE(company_name, job_name, location, deadline_date)
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_article ON jobs(article_id);
@@ -65,3 +68,4 @@ CREATE TABLE IF NOT EXISTS images (
   status TEXT,
   created_at TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_images_article ON images(article_id);
