@@ -155,6 +155,38 @@ def prefilter(
 
 
 @app.command()
+def extract(
+    db: str = typer.Option("data/job_intel.sqlite", help="SQLite 路径"),
+    config_dir: str = typer.Option("config", help="配置目录路径"),
+):
+    """仅执行提取阶段(对 CANDIDATE 状态文章调用 LLM 提取岗位)"""
+    from wehire_monitor.pipeline.runner import PipelineRunner
+
+    logger.info("执行提取阶段")
+    with PipelineRunner(
+        db_path=db, config_dir=config_dir, dry_run=False,
+        stages={"extract", "match"},
+    ) as runner:
+        runner.run()
+
+
+@app.command()
+def match(
+    db: str = typer.Option("data/job_intel.sqlite", help="SQLite 路径"),
+    config_dir: str = typer.Option("config", help="配置目录路径"),
+):
+    """仅执行匹配阶段(对已提取岗位计算匹配分)"""
+    from wehire_monitor.pipeline.runner import PipelineRunner
+
+    logger.info("执行匹配阶段")
+    with PipelineRunner(
+        db_path=db, config_dir=config_dir, dry_run=False,
+        stages={"match"},
+    ) as runner:
+        runner.run()
+
+
+@app.command()
 def schedule(
     db: str = typer.Option("data/job_intel.sqlite", help="SQLite 路径"),
     config_dir: str = typer.Option("config", help="配置目录路径"),

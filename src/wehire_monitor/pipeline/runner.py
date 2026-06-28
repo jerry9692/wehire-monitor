@@ -123,6 +123,8 @@ class PipelineRunner:
         )
 
         self.fetcher: Fetcher | None = None
+        self.extractor = None
+        self.matcher = None
 
         # 非 dry-run 且含 fetch 阶段时校验 Cookie/Token(抛异常而非 sys.exit,确保资源清理)
         if not self.dry_run and "fetch" in self.stages:
@@ -231,6 +233,10 @@ class PipelineRunner:
             # ========== 阶段2: 解析 + 预过滤 ==========
             if "parse" in self.stages or "prefilter" in self.stages:
                 candidate_count = self._process_articles(all_articles)
+
+            # ========== 阶段2.5: 提取 + 匹配 (v0.2) ==========
+            if "extract" in self.stages or "match" in self.stages:
+                self._extract_and_match()
 
             # ========== 阶段3: 推送 ==========
             if "notify" in self.stages:
@@ -464,6 +470,112 @@ class PipelineRunner:
                         logger.error(f"标记错误状态失败: {mark_err}")
 
         return candidate_count
+
+    def _init_extractor(self):
+        """初始化 Extractor(需要 LLM/OCR Provider)"""
+        from wehire_monitor.providers.factory import create_llm_provider, create_ocr_provider
+        llm = create_llm_provider()
+        ocr = None
+        try:
+            ocr = create_ocr_provider()
+        except Exception as e:
+            logger.warning(f"OCR Provider 初始化失败(将跳过 OCR 路径): {e}")
+        from wehire_monitor.modules.extractor.extractor import Extractor
+        return Extractor(llm_provider=llm, ocr_provider=ocr)
+
+    def _init_matcher(self):
+        """初始化 Matcher"""
+        from wehire_monitor.modules.matcher.matcher import Matcher
+        return Matcher(self.rules.match_rules)
+
+    def _extract_and_match(self) -> None:
+        """对 CANDIDATE 文章执行提取+匹配(v0.2)"""
+        if self.dry_run:
+            logger.info("dry-run 模式:跳过提取+匹配")
+            return
+
+        try:
+            self.extractor = self._init_extractor()
+        except Exception as e:
+            logger.error(f"Extractor 初始化失败: {e}")
+            return
+        self.matcher = self._init_matcher()
+
+        candidates = self.repo.query_by_status(Status.CANDIDATE)
+        logger.info(f"提取阶段: {len(candidates)} 篇候选文章")
+
+        for c in candidates:
+            article_id = c["id"]
+            try:
+                # 构造 ArticleMeta 重新解析获取 plain_text
+                meta = ArticleMeta(
+                    account_name=c["account_name"],
+                    title=c["title"],
+                    url=c["url"],
+                    publish_time=datetime.fromisoformat(c["publish_time"]),
+                )
+                parsed = self.parser.parse(meta)
+
+                from wehire_monitor.domain.models import PrefilterResult
+                pf_result = PrefilterResult(
+                    score=c.get("prefilter_score", 0) or 0,
+                    reasons=json.loads(c.get("prefilter_reasons", "[]") or "[]"),
+                    decision="extract",
+                )
+
+                extraction = self.extractor.extract(parsed, pf_result)
+
+                # 状态迁移: CANDIDATE → EXTRACTED
+                self.repo.force_status(article_id, Status.EXTRACTED)
+
+                # 写入 jobs
+                if extraction.jobs:
+                    self.repo.upsert_jobs(article_id, extraction.jobs)
+
+                    # 匹配
+                    matched = self.matcher.match(extraction.jobs)
+                    for m in matched:
+                        job_id = hashlib.sha256(
+                            f"{m.job.company_name or ''}|{m.job.job_name or ''}|{m.job.location or ''}|{m.job.deadline.date or ''}".encode()
+                        ).hexdigest()[:16]
+                        self.repo.conn.execute(
+                            "UPDATE jobs SET match_score = ? WHERE id = ?",
+                            (m.match_score, job_id),
+                        )
+                    self.repo.conn.commit()
+
+                    # 判断是否达标
+                    any_matched = any(
+                        m.match_score >= self.rules.match_rules.notify_min_score
+                        for m in matched
+                    )
+                    if any_matched:
+                        self.repo.transition(article_id, Status.EXTRACTED, Status.VALIDATED)
+                        self.repo.transition(article_id, Status.VALIDATED, Status.MATCHED)
+                    else:
+                        self.repo.transition(article_id, Status.EXTRACTED, Status.VALIDATED)
+                        self.repo.transition(article_id, Status.VALIDATED, Status.ARCHIVED)
+                else:
+                    self.repo.transition(article_id, Status.EXTRACTED, Status.ARCHIVED)
+
+                # 更新 article_type
+                self.repo.upsert_article(
+                    article_id=article_id,
+                    account_name=c["account_name"], title=c["title"],
+                    url=c["url"], publish_time=c["publish_time"],
+                    status=Status.MATCHED if extraction.jobs else Status.ARCHIVED,
+                    article_type=extraction.article_type,
+                )
+
+                logger.info(
+                    f"文章 {article_id[:8]}: 提取 {len(extraction.jobs)} 岗位, "
+                    f"type={extraction.article_type}"
+                )
+
+            except Exception as e:
+                logger.error(f"提取失败: {c['title']} — {e}")
+                if not self.dry_run:
+                    self.repo.force_status(article_id, Status.ERROR_LLM)
 
     def _notify(self, candidate_count: int, fetched_count: int) -> None:
         """推送日报"""
