@@ -3,6 +3,7 @@
 v0.1 仅推送标题 + 链接 + 来源。
 使用列表格式(飞书/钉钉 markdown 均支持),不使用表格。
 """
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
@@ -219,6 +220,99 @@ class Notifier:
         except (ValueError, KeyError) as e:
             logger.error(f"钉钉推送数据错误: {e}")
             return NotifyResult(success=False, message=f"dingtalk data error: {e}")
+
+    # ========== v0.2: 结构化 Markdown 表格日报 ==========
+
+    def _mask_email(self, email: str | None) -> str:
+        """邮箱脱敏
+
+        - email_mask=True 时: hr@example.com → hr***@example.com
+        - email_mask=False 时: 原样返回
+        - None → "-"
+        """
+        if not email:
+            return "-"
+        if not self.email_mask:
+            return email
+        # hr@example.com → hr***@example.com
+        match = re.match(r"^([a-zA-Z0-9._%+-]{1,3})", email)
+        prefix = match.group(1) if match else "?"
+        domain = email.split("@")[-1] if "@" in email else ""
+        return f"{prefix}***@{domain}" if domain else f"{prefix}***"
+
+    def build_structured_markdown(
+        self,
+        date: str,
+        matched_jobs: list,
+        review_jobs: list,
+        total_fetched: int,
+        total_candidates: int,
+        platform: str = "dingtalk",
+    ) -> str:
+        """构建 v0.2 结构化 Markdown 日报(表格+复核区)
+
+        飞书不支持 ## 标题和 > 引用,用 **加粗** 替代。
+        空列表时显示"今日无新增命中岗位"。
+        """
+        # 飞书用加粗替代 ## 标题
+        title_prefix = "**" if platform == "feishu" else "## "
+        title_suffix = "**" if platform == "feishu" else ""
+        lines = [
+            f"{title_prefix}今日精准招聘日报｜{date}{title_suffix}",
+            "",
+            f"抓取 {total_fetched} 篇，候选 {total_candidates} 篇，命中 {len(matched_jobs)} 个岗位。",
+            "",
+        ]
+
+        if not matched_jobs and not review_jobs:
+            lines.append("今日无新增命中岗位。")
+            return "\n".join(lines)
+
+        # 主表: 命中岗位(截断到 max_per_run)
+        if matched_jobs:
+            shown = matched_jobs[: self.max_per_run]
+            lines.append(f"{title_prefix}命中岗位{title_suffix}")
+            lines.append("")
+            lines.append("| 公司 | 岗位 | 地点 | 截止日期 | 投递方式 | 来源 |")
+            lines.append("|---|---|---|---|---|---|")
+            for m in shown:
+                job = m.job
+                email_display = self._mask_email(job.email)
+                # 投递方式: 优先 apply_channel,但若其为邮箱则同样脱敏,避免泄漏
+                if job.apply_channel and "@" in job.apply_channel:
+                    apply = self._mask_email(job.apply_channel)
+                elif job.apply_channel:
+                    apply = job.apply_channel
+                elif job.email:
+                    apply = email_display
+                else:
+                    apply = "-"
+                source = getattr(m, "account_name", "-")
+                lines.append(
+                    f"| {job.company_name or '-'} | {job.job_name or '-'} | "
+                    f"{job.location or '-'} | {job.deadline.date or '-'} | "
+                    f"{apply} | {source} |"
+                )
+            if len(matched_jobs) > self.max_per_run:
+                lines.append(f"\n还有 {len(matched_jobs) - self.max_per_run} 条未展示")
+            lines.append("")
+
+        # 复核区: 低置信度岗位
+        if review_jobs:
+            lines.append(f"{title_prefix}需人工复核{title_suffix}")
+            lines.append("")
+            lines.append("| 公司 | 岗位 | 地点 | 置信度 | 原因 |")
+            lines.append("|---|---|---|---|---|")
+            for m in review_jobs:
+                job = m.job
+                warnings = job.source_evidence.get("_warnings", [])
+                reason = ", ".join(warnings) if warnings else "低置信度"
+                lines.append(
+                    f"| {job.company_name or '-'} | {job.job_name or '-'} | "
+                    f"{job.location or '-'} | {job.confidence} | {reason} |"
+                )
+
+        return "\n".join(lines)
 
     def close(self) -> None:
         self._client.close()
