@@ -42,6 +42,7 @@ from wehire_monitor.modules.notifier.notifier import (
 from wehire_monitor.modules.parser.parser import Parser
 from wehire_monitor.modules.prefilter.prefilter import Prefilter
 from wehire_monitor.modules.storage.repository import Repository
+from wehire_monitor.modules.extractor.postprocess import needs_review
 
 # 项目根目录
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
@@ -717,16 +718,24 @@ class PipelineRunner:
 
             except Exception as e:
                 logger.error(f"匹配失败: {art['title']} — {e}")
+                try:
+                    self.repo.force_status(article_id, Status.ERROR_LLM)
+                except Exception:
+                    pass
 
         return matched_count
 
     def _notify(self, fetched_count: int, candidate_count: int, matched_count: int) -> None:
-        """推送结构化日报(v0.2): 查询 MATCHED 岗位,生成表格+复核区 Markdown"""
+        """推送结构化日报(v0.2): 查询 MATCHED 岗位,生成表格+复核区 Markdown
+
+        质量门控(SRS §4.4): confidence<60 / email_mismatch / email_invalid /
+        deadline_before_publish 的岗位进复核区,不进主表。
+        """
         if self.dry_run:
             logger.info("dry-run 模式:跳过推送")
             return
 
-        # 查询匹配分达标的岗位(未通知)
+        # 查询匹配分达标的岗位(未通知,文章状态为 matched)
         min_score = self.rules.match_rules.notify_min_score
         jobs_rows = self.repo.query_jobs_for_notify(min_score=min_score)
         # 查询 NEED_REVIEW 状态文章(复核区)
@@ -746,11 +755,13 @@ class PipelineRunner:
             return
 
         # 将 jobs_rows 转换为 MatchedJob(含 account_name)
+        # 按 needs_review 拆分: 需复核的进 review_jobs, 达标的进 matched_jobs
         from wehire_monitor.domain.models import (
             Job as DJob, Deadline, MatchedJob,
         )
         matched_jobs: list[MatchedJob] = []
         job_ids: list[str] = []
+        review_jobs: list[MatchedJob] = []
         for row in jobs_rows:
             job = DJob(
                 company_name=row["company_name"] or None,
@@ -774,11 +785,14 @@ class PipelineRunner:
                 article_title=row.get("article_title", ""),
                 article_url=row.get("article_url", ""),
             )
-            matched_jobs.append(mj)
-            job_ids.append(row["id"])
+            # 质量门控: needs_review 的岗位进复核区,不进主表
+            if needs_review(job):
+                review_jobs.append(mj)
+            else:
+                matched_jobs.append(mj)
+                job_ids.append(row["id"])
 
         # 复核区: NEED_REVIEW 文章构造为简化条目
-        review_jobs: list[MatchedJob] = []
         for art in review_articles:
             # 查询该文章的 jobs(如有)
             art_jobs = self.repo.query_jobs_by_article(art["id"])
@@ -801,20 +815,27 @@ class PipelineRunner:
                     rj = MatchedJob(
                         job=rjob, match_score=0, match_reasons=[],
                         account_name=art["account_name"],
+                        article_title=art["title"],
+                        article_url=art["url"],
                     )
                     review_jobs.append(rj)
             else:
                 # 无 jobs 的 need_review 文章(如 OCR 质量过低)
+                # 使用文章的 prefilter_reasons 作为复核原因
+                pf_reasons = json.loads(art.get("prefilter_reasons") or "[]")
+                review_reason = ", ".join(pf_reasons) if pf_reasons else "需人工复核"
                 rjob = DJob(
                     company_name=None, job_name=art["title"], location=None,
                     apply_channel=None, email=None, email_chars=[],
                     deadline=Deadline(date=None, inferred=False),
-                    source_evidence={"_warnings": ["need_review: OCR 质量过低"]},
+                    source_evidence={"_warnings": [review_reason]},
                     confidence=0,
                 )
                 rj = MatchedJob(
                     job=rjob, match_score=0, match_reasons=[],
                     account_name=art["account_name"],
+                    article_title=art["title"],
+                    article_url=art["url"],
                 )
                 review_jobs.append(rj)
 

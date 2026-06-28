@@ -211,6 +211,7 @@ class Repository:
     def upsert_jobs(self, article_id: str, jobs: list) -> list[str]:
         """批量写入岗位(jobs 表),自动去重(UNIQUE 约束)。
         在单个事务中完成,返回实际写入/更新的 job_id 列表。
+        异常时回滚并返回空列表。
         """
         now = datetime.now(timezone.utc).isoformat()
         inserted_ids: list[str] = []
@@ -257,6 +258,7 @@ class Repository:
         except sqlite3.IntegrityError as e:
             logger.warning(f"岗位写入异常: {e}")
             self.conn.rollback()
+            inserted_ids.clear()  # 回滚后返回空列表,避免返回已撤销的 id
         return inserted_ids
 
     def query_jobs_by_article(self, article_id: str) -> list[dict[str, Any]]:
@@ -268,14 +270,15 @@ class Repository:
         return [dict(row) for row in cursor.fetchall()]
 
     def query_jobs_for_notify(self, min_score: int = 70) -> list[dict[str, Any]]:
-        """查询匹配分达标的岗位(未通知)"""
+        """查询匹配分达标的岗位(未通知,文章状态为 matched)"""
         cursor = self.conn.execute(
             """SELECT j.*, a.title as article_title, a.url as article_url,
                       a.account_name as account_name
                FROM jobs j JOIN articles a ON j.article_id = a.id
                WHERE j.match_score >= ? AND j.notified_at IS NULL
+                 AND a.status = ?
                ORDER BY j.match_score DESC""",
-            (min_score,),
+            (min_score, Status.MATCHED.value),
         )
         return [dict(row) for row in cursor.fetchall()]
 

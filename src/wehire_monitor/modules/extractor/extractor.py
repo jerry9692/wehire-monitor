@@ -98,7 +98,7 @@ class Extractor:
 
         # 后处理校验(publish_time 为空时用当前日期兜底)
         fallback_date = publish_time[:10] if publish_time else ""
-        jobs = postprocess_jobs(response.jobs, fallback_date)
+        jobs = postprocess_jobs(response.jobs, fallback_date, article_text=combined_text)
 
         return ExtractionResult(
             article_type=response.article_type,

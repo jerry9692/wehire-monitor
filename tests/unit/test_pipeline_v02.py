@@ -277,5 +277,119 @@ def test_default_stages_include_extract_match():
     import inspect
     from wehire_monitor.pipeline import runner as runner_mod
     src = inspect.getsource(runner_mod.PipelineRunner.__init__)
-    assert '"extract"' in src or "'extract'" in src
-    assert '"match"' in src or "'match'" in src
+    assert "extract" in src
+    assert "match" in src
+
+
+def test_low_confidence_job_routed_to_review_not_main(tmp_db_path, sample_accounts_yaml, sample_rules_yaml):
+    """C1 修复: 低置信度岗位进复核区,不进主表"""
+    with patch("wehire_monitor.config.loader.ConfigLoader.get_feishu_webhook", return_value="http://fake"), \
+         patch("wehire_monitor.config.loader.ConfigLoader.get_dingtalk_webhook", return_value=None):
+        runner = PipelineRunner(
+            db_path=tmp_db_path,
+            accounts_path=sample_accounts_yaml,
+            rules_path=sample_rules_yaml,
+            dry_run=False,
+            stages={"notify"},
+        )
+
+    # 入库一篇 MATCHED 文章 + 低置信度岗位(match_score 达标但 confidence<60)
+    url_hash = hashlib.sha256(b"https://review.com").hexdigest()
+    runner.repo.upsert_article(
+        article_id=url_hash, account_name="号R", title="低置信度岗位",
+        url="https://review.com", publish_time="2026-06-28T10:00:00+08:00",
+        status=Status.MATCHED,
+    )
+    # 写入 jobs: match_score=80(达标) 但 confidence=40(低置信度)
+    low_conf_job = Job(
+        company_name="某公司", job_name="分析师", location="上海",
+        apply_channel=None, email=None, email_chars=[],
+        deadline=Deadline(date="2026-07-31", inferred=False),
+        source_evidence={"_warnings": ["low_confidence"]}, confidence=40,
+    )
+    runner.repo.upsert_jobs(url_hash, [low_conf_job])
+    # 手动设置 match_score
+    runner.repo.conn.execute(
+        "UPDATE jobs SET match_score = 80 WHERE article_id = ?", (url_hash,)
+    )
+    runner.repo.conn.commit()
+
+    # mock 推送,捕获传入的 matched_jobs 和 review_jobs
+    captured = {}
+
+    def fake_send_feishu(md_content, card_title="x"):
+        captured["md"] = md_content
+        from wehire_monitor.modules.notifier.notifier import NotifyResult
+        return NotifyResult(success=True, message="ok")
+
+    with patch.object(runner.notifier, "_send_feishu", side_effect=fake_send_feishu), \
+         patch.object(runner.config_loader, "get_feishu_webhook", return_value="http://fake"), \
+         patch.object(runner.config_loader, "get_dingtalk_webhook", return_value=None):
+        runner._notify(fetched_count=1, candidate_count=1, matched_count=1)
+
+    # 低置信度岗位不应被标记为已通知(进复核区而非主表)
+    job_row = runner.repo.conn.execute(
+        "SELECT notified_at FROM jobs WHERE article_id = ?", (url_hash,)
+    ).fetchone()
+    assert job_row["notified_at"] is None, "低置信度岗位不应被标记为已通知"
+
+    # Markdown 中应包含复核区而非主表
+    assert "需人工复核" in captured["md"] or "复核" in captured["md"]
+    runner.close()
+
+
+def test_query_jobs_for_notify_filters_by_matched_status(tmp_db_path, sample_accounts_yaml, sample_rules_yaml):
+    """H1 修复: query_jobs_for_notify 只查 status=matched 的文章"""
+    with patch("wehire_monitor.config.loader.ConfigLoader.get_feishu_webhook", return_value="http://fake"), \
+         patch("wehire_monitor.config.loader.ConfigLoader.get_dingtalk_webhook", return_value=None):
+        runner = PipelineRunner(
+            db_path=tmp_db_path,
+            accounts_path=sample_accounts_yaml,
+            rules_path=sample_rules_yaml,
+            dry_run=False,
+            stages={"notify"},
+        )
+
+    # MATCHED 文章 + job
+    hash_matched = hashlib.sha256(b"https://matched.com").hexdigest()
+    runner.repo.upsert_article(
+        article_id=hash_matched, account_name="号A", title="已匹配",
+        url="https://matched.com", publish_time="2026-06-28T10:00:00+08:00",
+        status=Status.MATCHED,
+    )
+    good_job = Job(
+        company_name="某公司", job_name="分析师", location="上海",
+        apply_channel="hr@example.com", email="hr@example.com",
+        email_chars=["h","r","@","x",".","c","o","m"],
+        deadline=Deadline(date="2026-07-31", inferred=False),
+        source_evidence={}, confidence=85,
+    )
+    runner.repo.upsert_jobs(hash_matched, [good_job])
+    runner.repo.conn.execute(
+        "UPDATE jobs SET match_score = 80 WHERE article_id = ?", (hash_matched,)
+    )
+
+    # ARCHIVED 文章 + job(同分但文章已归档)
+    hash_archived = hashlib.sha256(b"https://archived.com").hexdigest()
+    runner.repo.upsert_article(
+        article_id=hash_archived, account_name="号B", title="已归档",
+        url="https://archived.com", publish_time="2026-06-28T10:00:00+08:00",
+        status=Status.ARCHIVED,
+    )
+    archived_job = Job(
+        company_name="另一公司", job_name="另一岗位", location="上海",
+        apply_channel=None, email=None, email_chars=[],
+        deadline=Deadline(date="2026-07-31", inferred=False),
+        source_evidence={}, confidence=85,
+    )
+    runner.repo.upsert_jobs(hash_archived, [archived_job])
+    runner.repo.conn.execute(
+        "UPDATE jobs SET match_score = 80 WHERE article_id = ?", (hash_archived,)
+    )
+    runner.repo.conn.commit()
+
+    # 只应返回 MATCHED 文章的 job
+    jobs = runner.repo.query_jobs_for_notify(min_score=70)
+    assert len(jobs) == 1
+    assert jobs[0]["article_id"] == hash_matched
+    runner.close()

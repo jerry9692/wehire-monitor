@@ -128,3 +128,59 @@ def test_needs_review_false():
         source_evidence={"_warnings": []}, confidence=85,
     )
     assert needs_review(job) is False
+
+
+def test_needs_review_deadline_before_publish():
+    """截止日期早于发布时间 → 需复核(H2 修复)"""
+    job = Job(
+        company_name="某公司", job_name="某岗位", location="上海",
+        apply_channel="hr@example.com", email="hr@example.com",
+        email_chars=["h", "r", "@", "e", "x", "a", "m", "p", "l", "e", ".", "c", "o", "m"],
+        deadline=Deadline(date="2026-06-01", inferred=False),
+        source_evidence={"_warnings": ["deadline_before_publish"]}, confidence=85,
+    )
+    assert needs_review(job) is True
+
+
+def test_location_extraction_from_article_text():
+    """地点空但正文含城市词 → 二次抽取(M2 修复)"""
+    jobs = [
+        Job(
+            company_name="某公司", job_name="某岗位", location=None,
+            apply_channel=None, email=None, email_chars=[],
+            deadline=Deadline(date="2026-07-31", inferred=False),
+            source_evidence={}, confidence=85,
+        )
+    ]
+    article_text = "某公司在北京招聘数据分析师,工作地点位于朝阳区。"
+    result = postprocess_jobs(jobs, publish_time="2026-06-28", article_text=article_text)
+    assert result[0].location == "北京"
+
+
+def test_location_extraction_from_company_name():
+    """地点空但公司名含城市词 → 二次抽取"""
+    jobs = [
+        Job(
+            company_name="上海某证券公司", job_name="某岗位", location=None,
+            apply_channel=None, email=None, email_chars=[],
+            deadline=Deadline(date="2026-07-31", inferred=False),
+            source_evidence={}, confidence=85,
+        )
+    ]
+    result = postprocess_jobs(jobs, publish_time="2026-06-28", article_text="")
+    assert result[0].location == "上海"
+
+
+def test_location_not_overwritten_when_present():
+    """地点已有值 → 不被二次抽取覆盖"""
+    jobs = [
+        Job(
+            company_name="某公司", job_name="某岗位", location="杭州",
+            apply_channel=None, email=None, email_chars=[],
+            deadline=Deadline(date="2026-07-31", inferred=False),
+            source_evidence={}, confidence=85,
+        )
+    ]
+    article_text = "某公司在北京招聘"
+    result = postprocess_jobs(jobs, publish_time="2026-06-28", article_text=article_text)
+    assert result[0].location == "杭州"
