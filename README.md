@@ -2,6 +2,10 @@
 
 > 把"每天刷几十个公众号"变成"每天接收一份精准招聘日报"
 
+[![Gitee](https://img.shields.io/badge/Gitee-hongm_j%2Fwehire--monitor-C71D23?logo=gitee)](https://gitee.com/hongm_j/wehire-monitor)
+[![GitHub](https://img.shields.io/badge/GitHub-jerry9692%2Fwehire--monitor-181717?logo=github)](https://github.com/jerry9692/wehire-monitor)
+[![License](https://img.shields.io/badge/license-MIT-blue)](#license)
+
 面向个人低频使用的**微信公众号招聘情报监控管道**。聚焦金融、国企、央企、垂直社招机会,自动发现目标公众号新文章,经关键词预过滤、OCR、文本 LLM、VLM 混合提取,结构化出公司/岗位/地点/投递渠道/截止日期,按用户偏好推送每日精准招聘日报到飞书/钉钉。
 
 非商业爬虫平台,不追求高并发/账号池/代理池,不自动登录,不绕强风控。一个低频、轻量、可人工维护的本地自动化管道。
