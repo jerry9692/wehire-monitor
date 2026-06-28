@@ -1,0 +1,43 @@
+请从以下微信公众号招聘文章中提取招聘岗位信息。
+
+抽取字段：
+- company_name: 公司名称
+- job_name: 岗位名称
+- location: 工作地点
+- apply_channel: 投递邮箱、报名链接、二维码说明或其他投递方式
+- email: 邮箱；必须逐字符准确输出
+- email_chars: 邮箱字符数组，例如 ["h","r","@","x",".","c","o","m"]
+- deadline: 截止日期，统一 YYYY-MM-DD；无明确年份时结合文章发布时间推断，并标记 inferred=true
+- source_evidence: 每个字段对应的原文短证据
+- confidence: 0-100
+
+要求：
+1. 一篇文章可能包含多个岗位，输出 jobs 数组。
+2. 不抽取校招、实习、宣讲会、培训类信息。
+3. 如果是报名链接或二维码，没有邮箱，也要保留 apply_channel。
+4. 邮箱必须通过正则校验；无法确认时 email=null，但在 apply_channel 中保留原始片段。
+5. 不要输出正文中不存在的信息。
+
+返回严格 JSON，不要 Markdown，格式如下：
+{
+  "article_type": "social_recruitment | campus_recruitment | internship | non_recruitment | unknown",
+  "jobs": [
+    {
+      "company_name": "string|null",
+      "job_name": "string|null",
+      "location": "string|null",
+      "apply_channel": "string|null",
+      "email": "string|null",
+      "email_chars": ["string"],
+      "deadline": {"date": "YYYY-MM-DD|null", "inferred": false},
+      "source_evidence": {"company_name": "string|null", "job_name": "string|null", "location": "string|null", "apply_channel": "string|null", "deadline": "string|null"},
+      "confidence": 0
+    }
+  ],
+  "warnings": []
+}
+
+文章发布时间：{{publish_time}}
+文章标题：{{title}}
+正文：
+{{content}}
