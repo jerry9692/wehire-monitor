@@ -1,0 +1,8 @@
+accounts:
+  - name: "上海国资招聘"
+    alias: ["上海国资", "国资招聘"]
+    priority: high
+    enabled: true
+  - name: "金融招聘信息"
+    priority: medium
+    enabled: true

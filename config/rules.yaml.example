@@ -1,0 +1,21 @@
+match_rules:
+  locations:
+    include: ["上海", "杭州", "苏州"]
+    exclude: ["境外", "海外"]
+  job_keywords:
+    include: ["金融", "数据分析", "风控", "投研", "产品经理"]
+    exclude: ["实习", "校招", "劳务派遣"]
+  companies:
+    include: ["银行", "证券", "基金", "国企", "央企"]
+  notify_min_score: 70
+
+notify:
+  max_per_run: 20
+  push_when_empty: false
+  email_mask: true
+
+schedule:
+  daily_at: ["08:30", "20:30"]
+  window_hours: 36
+  max_articles_per_run: 80
+  max_articles_per_account: 10
