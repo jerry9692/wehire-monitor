@@ -76,3 +76,64 @@ class FetchResult:
     error_accounts: list[str]
     cookie_expired: bool = False
     captcha_required: bool = False
+
+
+# ========== v0.2 领域模型 ==========
+
+
+@dataclass
+class Deadline:
+    """截止日期"""
+    date: str | None          # YYYY-MM-DD 或 None
+    inferred: bool = False    # 是否推断的年份
+
+
+@dataclass
+class Job:
+    """结构化岗位信息"""
+    company_name: str | None
+    job_name: str | None
+    location: str | None
+    apply_channel: str | None
+    email: str | None
+    email_chars: list[str]
+    deadline: Deadline
+    source_evidence: dict
+    confidence: int           # 0-100
+
+
+@dataclass
+class ExtractionResult:
+    """提取结果"""
+    article_type: Literal[
+        "social_recruitment", "campus_recruitment",
+        "internship", "non_recruitment", "unknown"
+    ]
+    jobs: list[Job]
+    warnings: list[str]
+    llm_calls: int = 0
+    vlm_calls: int = 0
+    ocr_calls: int = 0
+
+
+@dataclass
+class MatchedJob:
+    """匹配后的岗位(含匹配分)"""
+    job: Job
+    match_score: int          # 0-100
+    match_reasons: list[str]
+
+
+@dataclass
+class OCRLine:
+    """OCR 单行结果"""
+    text: str
+    confidence: float         # 0.0-1.0
+    box: list[int]            # [x, y, w, h]
+
+
+@dataclass
+class OCRResult:
+    """OCR 完整结果"""
+    lines: list[OCRLine]
+    full_text: str
