@@ -119,13 +119,35 @@ def check_cookie(
 
 
 @app.command()
-def parse():
-    """仅执行解析阶段(对已入库 DISCOVERED 状态文章) — v0.2 完善"""
+def parse(
+    db: str = typer.Option("data/job_intel.sqlite", help="SQLite 路径"),
+    config_dir: str = typer.Option("config", help="配置目录路径"),
+):
+    """仅执行解析阶段(对已入库待处理文章)"""
     from wehire_monitor.pipeline.runner import PipelineRunner
 
     logger.info("执行解析阶段(对已入库文章)")
     with PipelineRunner(
-        db_path=str(_PROJECT_ROOT / "data" / "job_intel.sqlite"),
+        db_path=db,
+        config_dir=config_dir,
+        dry_run=False,
+        stages={"parse", "prefilter"},
+    ) as runner:
+        runner.run()
+
+
+@app.command()
+def prefilter(
+    db: str = typer.Option("data/job_intel.sqlite", help="SQLite 路径"),
+    config_dir: str = typer.Option("config", help="配置目录路径"),
+):
+    """仅执行预过滤阶段(对已入库待处理文章重新解析+过滤)"""
+    from wehire_monitor.pipeline.runner import PipelineRunner
+
+    logger.info("执行预过滤阶段(对已入库文章)")
+    with PipelineRunner(
+        db_path=db,
+        config_dir=config_dir,
         dry_run=False,
         stages={"parse", "prefilter"},
     ) as runner:
