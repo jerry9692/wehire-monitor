@@ -1,4 +1,6 @@
 """SQLite 仓库"""
+import hashlib
+import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -201,6 +203,76 @@ class Repository:
         )
         row = cursor.fetchone()
         return dict(row) if row else None
+
+    def upsert_jobs(self, article_id: str, jobs: list) -> None:
+        """批量写入岗位(jobs 表),自动去重(UNIQUE 约束)"""
+        now = datetime.now(timezone.utc).isoformat()
+        for job in jobs:
+            # job hash: company + job_name + location + deadline
+            job_key = "|".join([
+                (job.company_name or ""),
+                (job.job_name or ""),
+                (job.location or ""),
+                (job.deadline.date or ""),
+            ])
+            job_id = hashlib.sha256(job_key.encode()).hexdigest()[:16]
+
+            try:
+                self.conn.execute(
+                    """INSERT INTO jobs (id, article_id, company_name, job_name, location,
+                       apply_channel, email, email_chars, deadline_date, deadline_inferred,
+                       confidence, match_score, source_evidence, warnings, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(id) DO UPDATE SET
+                         confidence=excluded.confidence,
+                         source_evidence=excluded.source_evidence,
+                         warnings=excluded.warnings,
+                         updated_at=excluded.updated_at""",
+                    (
+                        job_id, article_id,
+                        job.company_name or "", job.job_name or "", job.location or "",
+                        job.apply_channel, job.email,
+                        json.dumps(job.email_chars, ensure_ascii=False),
+                        job.deadline.date or "", int(job.deadline.inferred),
+                        job.confidence, 0,  # match_score 默认 0,由 matcher 更新
+                        json.dumps(job.source_evidence, ensure_ascii=False),
+                        json.dumps(job.source_evidence.get("_warnings", []), ensure_ascii=False),
+                        now, now,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                logger.debug(f"岗位已存在,跳过: {job_key}")
+            self.conn.commit()
+
+    def query_jobs_by_article(self, article_id: str) -> list[dict[str, Any]]:
+        """查询某篇文章的所有岗位"""
+        cursor = self.conn.execute(
+            "SELECT * FROM jobs WHERE article_id = ? ORDER BY confidence DESC",
+            (article_id,),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def query_jobs_for_notify(self, min_score: int = 70) -> list[dict[str, Any]]:
+        """查询匹配分达标的岗位(未通知)"""
+        cursor = self.conn.execute(
+            """SELECT j.*, a.title as article_title, a.url as article_url,
+                      a.account_name as account_name
+               FROM jobs j JOIN articles a ON j.article_id = a.id
+               WHERE j.match_score >= ? AND j.notified_at IS NULL
+               ORDER BY j.match_score DESC""",
+            (min_score,),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def mark_jobs_notified(self, job_ids: list[str]) -> None:
+        """标记岗位已通知"""
+        now = datetime.now(timezone.utc).isoformat()
+        for jid in job_ids:
+            self.conn.execute(
+                "UPDATE jobs SET notified_at = ? WHERE id = ?",
+                (now, jid),
+            )
+        self.conn.commit()
 
     def close(self) -> None:
         if self._conn:
