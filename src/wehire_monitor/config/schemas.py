@@ -29,6 +29,7 @@ class JobKeywordRules(BaseModel):
 class CompanyRules(BaseModel):
     model_config = ConfigDict(extra="forbid")
     include: list[str] = Field(default_factory=list)
+    exclude: list[str] = Field(default_factory=list)
 
 
 class MatchRules(BaseModel):

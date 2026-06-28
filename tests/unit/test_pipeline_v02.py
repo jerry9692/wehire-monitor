@@ -229,3 +229,53 @@ def test_extract_dry_run_skips(tmp_db_path, sample_accounts_yaml, sample_rules_y
     article = runner.repo.get_article(url_hash)
     assert article["status"] == Status.CANDIDATE.value
     runner.close()
+
+
+def test_need_review_status_set_for_low_quality_ocr(tmp_db_path, sample_accounts_yaml, sample_rules_yaml):
+    """OCR 质量过低 → NEED_REVIEW 状态"""
+    runner = PipelineRunner(
+        db_path=tmp_db_path,
+        accounts_path=sample_accounts_yaml,
+        rules_path=sample_rules_yaml,
+        dry_run=False,
+        stages={"extract"},
+    )
+
+    url_hash = hashlib.sha256(b"https://f.com").hexdigest()
+    runner.repo.upsert_article(
+        article_id=url_hash, account_name="号F", title="图片招聘",
+        url="https://f.com", publish_time="2026-06-28T10:00:00+08:00",
+        status=Status.CANDIDATE,
+    )
+
+    parsed = ParsedArticle(
+        article_id=url_hash, title="图片招聘",
+        plain_text="", images=[], content_hash="ch5",
+    )
+
+    extraction = ExtractionResult(
+        article_type="unknown", jobs=[],
+        warnings=["need_review: OCR quality 0.30 < 0.45"],
+        ocr_calls=2,
+    )
+
+    with patch.object(runner.parser, "parse", return_value=parsed), \
+         patch.object(runner, "_init_extractor") as mock_init_ext:
+        mock_extractor = MagicMock()
+        mock_extractor.extract.return_value = extraction
+        mock_init_ext.return_value = mock_extractor
+        runner.run()
+
+    article = runner.repo.get_article(url_hash)
+    assert article["status"] == Status.NEED_REVIEW.value
+    runner.close()
+
+
+def test_default_stages_include_extract_match():
+    """默认 stages 应包含 extract 和 match(v0.2 核心流程)"""
+    # 直接验证 runner.py 中默认 stages 集合包含 v0.2 阶段
+    import inspect
+    from wehire_monitor.pipeline import runner as runner_mod
+    src = inspect.getsource(runner_mod.PipelineRunner.__init__)
+    assert '"extract"' in src or "'extract'" in src
+    assert '"match"' in src or "'match'" in src

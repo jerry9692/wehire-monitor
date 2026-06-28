@@ -72,7 +72,7 @@ class Parser:
         lower_url = url.lower().split("?")[0]
         for ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"):
             if lower_url.endswith(ext):
-                return ".jpeg" if ext == ".jpeg" else ext
+                return ".jpg" if ext == ".jpeg" else ext
         return ".jpg"
 
     def _download_image(

@@ -15,10 +15,10 @@ _EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 
 
 def validate_email(email: str | None) -> bool:
-    """邮箱正则校验"""
+    """邮箱正则校验(先 strip 空白)"""
     if not email:
         return False
-    return bool(_EMAIL_RE.match(email))
+    return bool(_EMAIL_RE.match(email.strip()))
 
 
 def validate_email_chars_consistency(job: Job) -> bool:
@@ -54,6 +54,9 @@ def postprocess_jobs(
         warnings: list[str] = []
         if "_warnings" not in job.source_evidence:
             job.source_evidence["_warnings"] = []
+        else:
+            # 保留 LLM 已产生的警告,追加后处理警告
+            warnings = list(job.source_evidence["_warnings"])
 
         # 邮箱校验
         if job.email and not validate_email(job.email):
@@ -69,7 +72,8 @@ def postprocess_jobs(
         if not check_confidence(job.confidence):
             warnings.append("low_confidence")
 
-        job.source_evidence["_warnings"] = warnings
+        # 去重后写回
+        job.source_evidence["_warnings"] = list(dict.fromkeys(warnings))
 
     return jobs
 

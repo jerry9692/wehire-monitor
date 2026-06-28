@@ -34,6 +34,7 @@ class ParsedArticle:
     plain_text: str
     images: list[ImageAsset]
     content_hash: str
+    publish_time: str = ""   # ISO8601 发布时间,供后处理校验截止日期使用
 
 
 @dataclass
@@ -122,6 +123,9 @@ class MatchedJob:
     job: Job
     match_score: int          # 0-100
     match_reasons: list[str]
+    account_name: str = "-"   # 来源公众号(供日报展示)
+    article_title: str = ""   # 文章标题
+    article_url: str = ""     # 文章链接
 
 
 @dataclass

@@ -166,6 +166,10 @@ class Repository:
             Status.PARSED.value,
             Status.ERROR_FETCH.value,
             Status.ERROR_PARSE.value,
+            Status.ERROR_OCR.value,
+            Status.ERROR_LLM.value,
+            Status.EXTRACTED.value,
+            Status.OCR_DONE.value,
         )
         placeholders = ",".join("?" * len(pending_statuses))
         cursor = self.conn.execute(
@@ -204,20 +208,23 @@ class Repository:
         row = cursor.fetchone()
         return dict(row) if row else None
 
-    def upsert_jobs(self, article_id: str, jobs: list) -> None:
-        """批量写入岗位(jobs 表),自动去重(UNIQUE 约束)"""
+    def upsert_jobs(self, article_id: str, jobs: list) -> list[str]:
+        """批量写入岗位(jobs 表),自动去重(UNIQUE 约束)。
+        在单个事务中完成,返回实际写入/更新的 job_id 列表。
+        """
         now = datetime.now(timezone.utc).isoformat()
-        for job in jobs:
-            # job hash: company + job_name + location + deadline
-            job_key = "|".join([
-                (job.company_name or ""),
-                (job.job_name or ""),
-                (job.location or ""),
-                (job.deadline.date or ""),
-            ])
-            job_id = hashlib.sha256(job_key.encode()).hexdigest()[:16]
+        inserted_ids: list[str] = []
+        try:
+            for job in jobs:
+                # job hash: company + job_name + location + deadline
+                job_key = "|".join([
+                    (job.company_name or ""),
+                    (job.job_name or ""),
+                    (job.location or ""),
+                    (job.deadline.date or ""),
+                ])
+                job_id = hashlib.sha256(job_key.encode()).hexdigest()[:16]
 
-            try:
                 self.conn.execute(
                     """INSERT INTO jobs (id, article_id, company_name, job_name, location,
                        apply_channel, email, email_chars, deadline_date, deadline_inferred,
@@ -227,6 +234,11 @@ class Repository:
                          confidence=excluded.confidence,
                          source_evidence=excluded.source_evidence,
                          warnings=excluded.warnings,
+                         apply_channel=excluded.apply_channel,
+                         email=excluded.email,
+                         email_chars=excluded.email_chars,
+                         deadline_date=excluded.deadline_date,
+                         deadline_inferred=excluded.deadline_inferred,
                          updated_at=excluded.updated_at""",
                     (
                         job_id, article_id,
@@ -234,15 +246,18 @@ class Repository:
                         job.apply_channel, job.email,
                         json.dumps(job.email_chars, ensure_ascii=False),
                         job.deadline.date or "", int(job.deadline.inferred),
-                        job.confidence, 0,  # match_score 默认 0,由 matcher 更新
+                        job.confidence, 0,
                         json.dumps(job.source_evidence, ensure_ascii=False),
                         json.dumps(job.source_evidence.get("_warnings", []), ensure_ascii=False),
                         now, now,
                     ),
                 )
-            except sqlite3.IntegrityError:
-                logger.debug(f"岗位已存在,跳过: {job_key}")
+                inserted_ids.append(job_id)
             self.conn.commit()
+        except sqlite3.IntegrityError as e:
+            logger.warning(f"岗位写入异常: {e}")
+            self.conn.rollback()
+        return inserted_ids
 
     def query_jobs_by_article(self, article_id: str) -> list[dict[str, Any]]:
         """查询某篇文章的所有岗位"""

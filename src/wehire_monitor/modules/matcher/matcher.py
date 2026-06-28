@@ -65,7 +65,7 @@ class Matcher:
             reasons.append(f"地点命中: {location}")
 
         # 排除词惩罚
-        if any(kw in company for kw in self.rules.job_keywords.exclude):
+        if any(kw in company for kw in self.rules.companies.exclude):
             score -= _PENALTY
             reasons.append(f"公司排除词命中")
         if any(kw in job_name for kw in self.rules.job_keywords.exclude):

@@ -67,7 +67,7 @@ def test_dry_run_processes_injected_articles(tmp_db_path, sample_accounts_yaml, 
 
             # dry-run 下 all_articles 为空(跳过抓取),手动注入
             runner._process_articles(mock_articles)
-            runner._notify(candidate_count=1, fetched_count=1)
+            runner._notify(fetched_count=1, candidate_count=1, matched_count=0)
 
             # parse 被调用(dry-run 走解析)
             mock_parse.assert_called_once()

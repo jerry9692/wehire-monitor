@@ -1,6 +1,7 @@
 """DeepSeek LLM 实现(OpenAI 兼容 API)"""
 from __future__ import annotations
 import json
+import time
 from pathlib import Path
 
 import httpx
@@ -36,7 +37,7 @@ class DeepSeekProvider:
     def extract_jobs(
         self, text: str, title: str, publish_time: str
     ) -> LLMResponse:
-        """调用 DeepSeek 提取岗位信息,JSON 解析失败重试 1 次"""
+        """调用 DeepSeek 提取岗位信息,支持 HTTP 错误/格式错误重试(最多3次)"""
         user_content = self._render_prompt(text, title, publish_time)
         system_prompt = (
             "你是招聘信息结构化抽取助手。只从用户提供的正文中抽取明确出现的信息,"
@@ -44,8 +45,10 @@ class DeepSeekProvider:
             "邮箱必须逐字符输出,并额外输出 email_chars 数组。"
             "返回严格 JSON,不要 Markdown。"
         )
+        max_attempts = 3
+        last_error = ""
 
-        for attempt in range(2):
+        for attempt in range(max_attempts):
             try:
                 resp = self._client.post(_API_URL, json={
                     "model": self.model,
@@ -60,24 +63,34 @@ class DeepSeekProvider:
                 data = resp.json()
                 content = data["choices"][0]["message"]["content"]
                 response = self._parse_response(content)
-                # JSON 解析成功或已用完重试次数则返回;否则重试
-                if response.success or attempt == 1:
+                if response.success:
                     return response
+                last_error = response.error or "JSON parse error"
                 logger.warning(
-                    f"DeepSeek JSON 解析失败,准备重试 (attempt {attempt + 1}/2)"
+                    f"DeepSeek 响应解析失败 (attempt {attempt + 1}/{max_attempts}): {last_error}"
                 )
-            except httpx.HTTPStatusError as e:
-                logger.error(f"DeepSeek API 错误 (attempt {attempt + 1}): {e}")
-                return LLMResponse(success=False, error=f"API error: {e}")
+            except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.HTTPError) as e:
+                last_error = f"API error: {e}"
+                logger.warning(
+                    f"DeepSeek HTTP 错误 (attempt {attempt + 1}/{max_attempts}): {e}"
+                )
             except (KeyError, IndexError) as e:
-                logger.error(f"DeepSeek 响应格式错误: {e}")
-                return LLMResponse(success=False, error=f"response format error: {e}")
+                last_error = f"response format error: {e}"
+                logger.warning(
+                    f"DeepSeek 响应格式错误 (attempt {attempt + 1}/{max_attempts}): {e}"
+                )
             except Exception as e:
-                logger.error(f"DeepSeek 调用异常 (attempt {attempt + 1}): {e}")
-                if attempt == 1:
-                    return LLMResponse(success=False, error=str(e))
+                last_error = str(e)
+                logger.warning(
+                    f"DeepSeek 调用异常 (attempt {attempt + 1}/{max_attempts}): {e}"
+                )
 
-        return LLMResponse(success=False, error="max retries exceeded")
+            # 退避等待(最后一次不等待)
+            if attempt < max_attempts - 1:
+                wait = 2 ** attempt
+                time.sleep(wait)
+
+        return LLMResponse(success=False, error=f"max retries exceeded: {last_error}")
 
     def _render_prompt(self, text: str, title: str, publish_time: str) -> str:
         template = self._prompt_template

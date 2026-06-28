@@ -77,10 +77,8 @@ class Extractor:
         if ocr_text:
             combined_text = f"{article.plain_text}\n\n[图片OCR文本]\n{ocr_text}"
 
-        # 截取发布时间的日期部分
-        publish_time = ""
-        if hasattr(article, "publish_time") and article.publish_time:
-            publish_time = str(article.publish_time)[:10]
+        # 使用 article.publish_time(ParsedArticle 新增字段)
+        publish_time = article.publish_time or ""
 
         response = self.llm.extract_jobs(
             text=combined_text,
@@ -98,8 +96,9 @@ class Extractor:
                 ocr_calls=ocr_calls,
             )
 
-        # 后处理校验
-        jobs = postprocess_jobs(response.jobs, publish_time or "2026-01-01")
+        # 后处理校验(publish_time 为空时用当前日期兜底)
+        fallback_date = publish_time[:10] if publish_time else ""
+        jobs = postprocess_jobs(response.jobs, fallback_date)
 
         return ExtractionResult(
             article_type=response.article_type,
@@ -110,10 +109,11 @@ class Extractor:
         )
 
     def _extract_with_ocr(self, article: ParsedArticle) -> ExtractionResult:
-        """OCR → 质量评分 → LLM"""
+        """OCR → 质量评分 → LLM(多图 y 坐标加偏移避免顺序评分错误)"""
         all_lines = []
         ocr_texts: list[str] = []
         ocr_calls = 0
+        y_offset = 0  # 多图累加 y 偏移,保证全局 y 单调递增
 
         for img in article.images:
             if not img.local_path:
@@ -121,7 +121,27 @@ class Extractor:
             result = self.ocr.ocr(img.local_path)
             ocr_calls += 1
             if result.lines:
-                all_lines.extend(result.lines)
+                # 给当前图片的每行 y 坐标加上偏移
+                for line in result.lines:
+                    adjusted_box = [
+                        line.box[0],
+                        line.box[1] + y_offset,
+                        line.box[2],
+                        line.box[3],
+                    ]
+                    # 重建 OCRLine(y 偏移后)
+                    from wehire_monitor.domain.models import OCRLine
+                    all_lines.append(OCRLine(
+                        text=line.text,
+                        confidence=line.confidence,
+                        box=adjusted_box,
+                    ))
+                # 更新偏移:取当前图所有行的最大 y + box 高度
+                max_y = max(
+                    (line.box[1] + line.box[3] for line in result.lines),
+                    default=y_offset,
+                )
+                y_offset = max_y + 10  # 留 10px 间距
             if result.full_text:
                 ocr_texts.append(result.full_text)
 
@@ -147,7 +167,6 @@ class Extractor:
             )
 
         # 质量达标(>=0.45): OCR文本 + 原文 → 文本 LLM
-        # v0.2 中 0.45<=score<0.72 与 score>=0.72 均暂走文本 LLM
         return self._extract_with_llm(
             article, ocr_text=combined_ocr, ocr_calls=ocr_calls
         )

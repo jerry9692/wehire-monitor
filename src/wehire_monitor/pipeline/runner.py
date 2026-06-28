@@ -25,7 +25,7 @@ except ImportError:
 
 from wehire_monitor.config.loader import ConfigLoader
 from wehire_monitor.config.schemas import AccountConfig, RulesConfig
-from wehire_monitor.domain.models import ArticleMeta, ParsedArticle
+from wehire_monitor.domain.models import ArticleMeta, ParsedArticle, PrefilterResult
 from wehire_monitor.domain.status import Status
 from wehire_monitor.modules.fetcher.fetcher import Fetcher
 from wehire_monitor.modules.fetcher.exceptions import (
@@ -79,7 +79,7 @@ class PipelineRunner:
             stages: 要执行的阶段集合,如 {"fetch","parse","notify"}。None 表示全部阶段。
         """
         self.dry_run = dry_run
-        self.stages = stages or {"fetch", "parse", "prefilter", "notify"}
+        self.stages = stages or {"fetch", "parse", "prefilter", "extract", "match", "notify"}
         self.config_loader = ConfigLoader(
             config_dir=config_dir,
             accounts_path=accounts_path,
@@ -166,6 +166,16 @@ class PipelineRunner:
         except Exception:
             pass
         try:
+            if self.extractor is not None:
+                if hasattr(self.extractor, 'llm') and hasattr(self.extractor.llm, 'close'):
+                    self.extractor.llm.close()
+                if hasattr(self.extractor, 'ocr') and self.extractor.ocr is not None \
+                        and hasattr(self.extractor.ocr, 'close'):
+                    self.extractor.ocr.close()
+                self.extractor = None
+        except Exception:
+            pass
+        try:
             self.parser.close()
         except Exception:
             pass
@@ -197,6 +207,9 @@ class PipelineRunner:
 
         fetched_count = 0
         candidate_count = 0
+        matched_count = 0
+        total_llm_calls = 0
+        total_ocr_calls = 0
         error_summary: str | None = None
         fatal_error = False
         all_articles: list[ArticleMeta] = []
@@ -234,13 +247,19 @@ class PipelineRunner:
             if "parse" in self.stages or "prefilter" in self.stages:
                 candidate_count = self._process_articles(all_articles)
 
-            # ========== 阶段2.5: 提取 + 匹配 (v0.2) ==========
-            if "extract" in self.stages or "match" in self.stages:
-                self._extract_and_match()
+            # ========== 阶段2.5: 提取 (v0.2) ==========
+            if "extract" in self.stages:
+                stats = self._do_extract()
+                total_llm_calls = stats["llm_calls"]
+                total_ocr_calls = stats["ocr_calls"]
+
+            # ========== 阶段2.6: 匹配 (v0.2) ==========
+            if "match" in self.stages:
+                matched_count = self._do_match()
 
             # ========== 阶段3: 推送 ==========
             if "notify" in self.stages:
-                self._notify(candidate_count, fetched_count)
+                self._notify(fetched_count, candidate_count, matched_count)
 
         # 更新运行日志
         self.repo.update_run(
@@ -248,10 +267,14 @@ class PipelineRunner:
             ended_at=_now_iso(),
             fetched_count=fetched_count,
             candidate_count=candidate_count,
+            llm_count=total_llm_calls,
+            ocr_count=total_ocr_calls,
             error_summary=error_summary,
         )
         logger.info(
-            f"=== 运行结束 {self.run_id}: fetched={fetched_count}, candidates={candidate_count} ==="
+            f"=== 运行结束 {self.run_id}: fetched={fetched_count}, "
+            f"candidates={candidate_count}, matched={matched_count}, "
+            f"llm_calls={total_llm_calls}, ocr_calls={total_ocr_calls} ==="
         )
 
     def _do_fetch(self) -> dict:
@@ -488,26 +511,30 @@ class PipelineRunner:
         from wehire_monitor.modules.matcher.matcher import Matcher
         return Matcher(self.rules.match_rules)
 
-    def _extract_and_match(self) -> None:
-        """对 CANDIDATE 文章执行提取+匹配(v0.2)"""
+    def _do_extract(self) -> dict:
+        """对 CANDIDATE 文章执行 LLM 提取(v0.2)
+
+        返回 {"llm_calls": int, "ocr_calls": int}
+        """
         if self.dry_run:
-            logger.info("dry-run 模式:跳过提取+匹配")
-            return
+            logger.info("dry-run 模式:跳过提取")
+            return {"llm_calls": 0, "ocr_calls": 0}
 
         try:
             self.extractor = self._init_extractor()
         except Exception as e:
             logger.error(f"Extractor 初始化失败: {e}")
-            return
-        self.matcher = self._init_matcher()
+            return {"llm_calls": 0, "ocr_calls": 0}
 
         candidates = self.repo.query_by_status(Status.CANDIDATE)
         logger.info(f"提取阶段: {len(candidates)} 篇候选文章")
 
+        total_llm = 0
+        total_ocr = 0
+
         for c in candidates:
             article_id = c["id"]
             try:
-                # 构造 ArticleMeta 重新解析获取 plain_text
                 meta = ArticleMeta(
                     account_name=c["account_name"],
                     title=c["title"],
@@ -515,8 +542,9 @@ class PipelineRunner:
                     publish_time=datetime.fromisoformat(c["publish_time"]),
                 )
                 parsed = self.parser.parse(meta)
+                # 将 publish_time 写入 ParsedArticle 供后处理校验使用
+                parsed.publish_time = c["publish_time"]
 
-                from wehire_monitor.domain.models import PrefilterResult
                 pf_result = PrefilterResult(
                     score=c.get("prefilter_score", 0) or 0,
                     reasons=json.loads(c.get("prefilter_reasons", "[]") or "[]"),
@@ -524,99 +552,327 @@ class PipelineRunner:
                 )
 
                 extraction = self.extractor.extract(parsed, pf_result)
+                total_llm += extraction.llm_calls
+                total_ocr += extraction.ocr_calls
+
+                # 检查是否需要人工复核
+                needs_review_flag = any(
+                    "need_review" in w for w in extraction.warnings
+                )
+
+                if needs_review_flag:
+                    # need_review: 直接标记为 NEED_REVIEW,不进入匹配
+                    self.repo.force_status(article_id, Status.NEED_REVIEW)
+                    self.repo.upsert_article(
+                        article_id=article_id,
+                        account_name=c["account_name"], title=c["title"],
+                        url=c["url"], publish_time=c["publish_time"],
+                        status=Status.NEED_REVIEW,
+                        content_hash=c.get("content_hash"),
+                        prefilter_score=c.get("prefilter_score"),
+                        prefilter_reasons=c.get("prefilter_reasons"),
+                        article_type=extraction.article_type,
+                    )
+                    logger.info(
+                        f"文章 {article_id[:8]}: 需人工复核, warnings={extraction.warnings}"
+                    )
+                    continue
 
                 # 状态迁移: CANDIDATE → EXTRACTED
                 self.repo.force_status(article_id, Status.EXTRACTED)
 
-                # 写入 jobs
                 if extraction.jobs:
-                    self.repo.upsert_jobs(article_id, extraction.jobs)
-
-                    # 匹配
-                    matched = self.matcher.match(extraction.jobs)
-                    for m in matched:
-                        job_id = hashlib.sha256(
-                            f"{m.job.company_name or ''}|{m.job.job_name or ''}|{m.job.location or ''}|{m.job.deadline.date or ''}".encode()
-                        ).hexdigest()[:16]
-                        self.repo.conn.execute(
-                            "UPDATE jobs SET match_score = ? WHERE id = ?",
-                            (m.match_score, job_id),
-                        )
-                    self.repo.conn.commit()
-
-                    # 判断是否达标
-                    any_matched = any(
-                        m.match_score >= self.rules.match_rules.notify_min_score
-                        for m in matched
+                    # 写入 jobs(返回 job_id 列表)
+                    job_ids = self.repo.upsert_jobs(article_id, extraction.jobs)
+                    # 更新 article_type(保护已有字段)
+                    self.repo.upsert_article(
+                        article_id=article_id,
+                        account_name=c["account_name"], title=c["title"],
+                        url=c["url"], publish_time=c["publish_time"],
+                        status=Status.EXTRACTED,
+                        content_hash=c.get("content_hash"),
+                        prefilter_score=c.get("prefilter_score"),
+                        prefilter_reasons=c.get("prefilter_reasons"),
+                        article_type=extraction.article_type,
                     )
-                    if any_matched:
-                        self.repo.transition(article_id, Status.EXTRACTED, Status.VALIDATED)
-                        self.repo.transition(article_id, Status.VALIDATED, Status.MATCHED)
-                    else:
-                        self.repo.transition(article_id, Status.EXTRACTED, Status.VALIDATED)
-                        self.repo.transition(article_id, Status.VALIDATED, Status.ARCHIVED)
+                    logger.info(
+                        f"文章 {article_id[:8]}: 提取 {len(extraction.jobs)} 岗位, "
+                        f"type={extraction.article_type}"
+                    )
                 else:
-                    self.repo.transition(article_id, Status.EXTRACTED, Status.ARCHIVED)
-
-                # 更新 article_type
-                self.repo.upsert_article(
-                    article_id=article_id,
-                    account_name=c["account_name"], title=c["title"],
-                    url=c["url"], publish_time=c["publish_time"],
-                    status=Status.MATCHED if extraction.jobs else Status.ARCHIVED,
-                    article_type=extraction.article_type,
-                )
-
-                logger.info(
-                    f"文章 {article_id[:8]}: 提取 {len(extraction.jobs)} 岗位, "
-                    f"type={extraction.article_type}"
-                )
+                    # 无岗位 → 归档
+                    self.repo.force_status(article_id, Status.ARCHIVED)
+                    self.repo.upsert_article(
+                        article_id=article_id,
+                        account_name=c["account_name"], title=c["title"],
+                        url=c["url"], publish_time=c["publish_time"],
+                        status=Status.ARCHIVED,
+                        content_hash=c.get("content_hash"),
+                        prefilter_score=c.get("prefilter_score"),
+                        prefilter_reasons=c.get("prefilter_reasons"),
+                        article_type=extraction.article_type,
+                    )
+                    logger.info(
+                        f"文章 {article_id[:8]}: 无岗位信息,归档, type={extraction.article_type}"
+                    )
 
             except Exception as e:
                 logger.error(f"提取失败: {c['title']} — {e}")
                 if not self.dry_run:
-                    self.repo.force_status(article_id, Status.ERROR_LLM)
+                    try:
+                        self.repo.force_status(article_id, Status.ERROR_LLM)
+                    except Exception:
+                        pass
 
-    def _notify(self, candidate_count: int, fetched_count: int) -> None:
-        """推送日报"""
+        return {"llm_calls": total_llm, "ocr_calls": total_ocr}
+
+    def _do_match(self) -> int:
+        """对已提取岗位计算匹配分(v0.2),返回命中岗位数"""
+        if self.dry_run:
+            logger.info("dry-run 模式:跳过匹配")
+            return 0
+
+        self.matcher = self._init_matcher()
+        matched_count = 0
+        notify_min = self.rules.match_rules.notify_min_score
+
+        # 处理 EXTRACTED 状态文章
+        extracted = self.repo.query_by_status(Status.EXTRACTED)
+        logger.info(f"匹配阶段: {len(extracted)} 篇已提取文章")
+
+        for art in extracted:
+            article_id = art["id"]
+            try:
+                jobs_rows = self.repo.query_jobs_by_article(article_id)
+                if not jobs_rows:
+                    # 无岗位 → 归档
+                    self.repo.force_status(article_id, Status.ARCHIVED)
+                    continue
+
+                # 从 DB 行重建 Job 对象
+                from wehire_monitor.domain.models import Job as DJob, Deadline
+                jobs = []
+                for row in jobs_rows:
+                    jobs.append(DJob(
+                        company_name=row["company_name"] or None,
+                        job_name=row["job_name"] or None,
+                        location=row["location"] or None,
+                        apply_channel=row["apply_channel"],
+                        email=row["email"],
+                        email_chars=json.loads(row["email_chars"] or "[]"),
+                        deadline=Deadline(
+                            date=row["deadline_date"] or None,
+                            inferred=bool(row["deadline_inferred"]),
+                        ),
+                        source_evidence=json.loads(row["source_evidence"] or "{}"),
+                        confidence=row["confidence"] or 0,
+                    ))
+
+                matched = self.matcher.match(jobs)
+
+                # 更新 match_score(使用 upsert_jobs 返回的 id 列表保证一致性)
+                for m, row in zip(matched, jobs_rows):
+                    self.repo.conn.execute(
+                        "UPDATE jobs SET match_score = ? WHERE id = ?",
+                        (m.match_score, row["id"]),
+                    )
+                self.repo.conn.commit()
+
+                any_matched = any(m.match_score >= notify_min for m in matched)
+                if any_matched:
+                    # 直接 force 到 MATCHED(跳过中间 VALIDATED 简化状态机)
+                    self.repo.force_status(article_id, Status.MATCHED)
+                    matched_count += sum(
+                        1 for m in matched if m.match_score >= notify_min
+                    )
+                    # 保护已有字段
+                    self.repo.upsert_article(
+                        article_id=article_id,
+                        account_name=art["account_name"], title=art["title"],
+                        url=art["url"], publish_time=art["publish_time"],
+                        status=Status.MATCHED,
+                        content_hash=art.get("content_hash"),
+                        prefilter_score=art.get("prefilter_score"),
+                        prefilter_reasons=art.get("prefilter_reasons"),
+                        article_type=art.get("article_type"),
+                    )
+                else:
+                    self.repo.force_status(article_id, Status.ARCHIVED)
+                    self.repo.upsert_article(
+                        article_id=article_id,
+                        account_name=art["account_name"], title=art["title"],
+                        url=art["url"], publish_time=art["publish_time"],
+                        status=Status.ARCHIVED,
+                        content_hash=art.get("content_hash"),
+                        prefilter_score=art.get("prefilter_score"),
+                        prefilter_reasons=art.get("prefilter_reasons"),
+                        article_type=art.get("article_type"),
+                    )
+
+                logger.info(
+                    f"文章 {article_id[:8]}: 匹配 "
+                    f"{sum(1 for m in matched if m.match_score >= notify_min)}/"
+                    f"{len(matched)} 个岗位达标"
+                )
+
+            except Exception as e:
+                logger.error(f"匹配失败: {art['title']} — {e}")
+
+        return matched_count
+
+    def _notify(self, fetched_count: int, candidate_count: int, matched_count: int) -> None:
+        """推送结构化日报(v0.2): 查询 MATCHED 岗位,生成表格+复核区 Markdown"""
         if self.dry_run:
             logger.info("dry-run 模式:跳过推送")
             return
 
-        candidates = self.repo.query_by_status(Status.CANDIDATE)
-        items = [
-            ReportItem(
-                title=c["title"],
-                url=c["url"],
-                account_name=c["account_name"],
-            )
-            for c in candidates
-        ]
+        # 查询匹配分达标的岗位(未通知)
+        min_score = self.rules.match_rules.notify_min_score
+        jobs_rows = self.repo.query_jobs_for_notify(min_score=min_score)
+        # 查询 NEED_REVIEW 状态文章(复核区)
+        review_articles = self.repo.query_by_status(Status.NEED_REVIEW)
 
-        report = DailyReport(
-            date=_today_str(),
-            items=items,
-            total_fetched=fetched_count,
-            total_candidates=candidate_count,
+        if not jobs_rows and not review_articles:
+            if self.rules.notify.push_when_empty:
+                report = DailyReport(
+                    date=_today_str(),
+                    items=[],
+                    total_fetched=fetched_count,
+                    total_candidates=candidate_count,
+                )
+                self.notifier.send_daily(report)
+            else:
+                logger.info("无命中岗位且无复核项,跳过推送")
+            return
+
+        # 将 jobs_rows 转换为 MatchedJob(含 account_name)
+        from wehire_monitor.domain.models import (
+            Job as DJob, Deadline, MatchedJob,
         )
-
-        result: NotifyResult = self.notifier.send_daily(report)
-        if result.success and result.pushed_count > 0:
-            pushed = candidates[: result.pushed_count]
-            for c in pushed:
-                try:
-                    self.repo.transition(c["id"], Status.CANDIDATE, Status.NOTIFIED)
-                    self.repo.transition(c["id"], Status.NOTIFIED, Status.ARCHIVED)
-                except ValueError as e:
-                    logger.warning(f"归档失败: {c['title']} — {e}")
-            remaining = len(candidates) - result.pushed_count
-            logger.info(
-                f"推送成功: 展示 {result.pushed_count} 条, 剩余 {remaining} 条留待下次"
+        matched_jobs: list[MatchedJob] = []
+        job_ids: list[str] = []
+        for row in jobs_rows:
+            job = DJob(
+                company_name=row["company_name"] or None,
+                job_name=row["job_name"] or None,
+                location=row["location"] or None,
+                apply_channel=row["apply_channel"],
+                email=row["email"],
+                email_chars=json.loads(row["email_chars"] or "[]"),
+                deadline=Deadline(
+                    date=row["deadline_date"] or None,
+                    inferred=bool(row["deadline_inferred"]),
+                ),
+                source_evidence=json.loads(row["source_evidence"] or "{}"),
+                confidence=row["confidence"] or 0,
             )
-        elif result.success and result.pushed_count == 0 and not items:
-            logger.info("无候选文章,跳过推送")
+            mj = MatchedJob(
+                job=job,
+                match_score=row["match_score"] or 0,
+                match_reasons=[],
+                account_name=row.get("account_name", "-"),
+                article_title=row.get("article_title", ""),
+                article_url=row.get("article_url", ""),
+            )
+            matched_jobs.append(mj)
+            job_ids.append(row["id"])
+
+        # 复核区: NEED_REVIEW 文章构造为简化条目
+        review_jobs: list[MatchedJob] = []
+        for art in review_articles:
+            # 查询该文章的 jobs(如有)
+            art_jobs = self.repo.query_jobs_by_article(art["id"])
+            if art_jobs:
+                for jrow in art_jobs:
+                    rjob = DJob(
+                        company_name=jrow["company_name"] or None,
+                        job_name=jrow["job_name"] or None,
+                        location=jrow["location"] or None,
+                        apply_channel=jrow["apply_channel"],
+                        email=jrow["email"],
+                        email_chars=json.loads(jrow["email_chars"] or "[]"),
+                        deadline=Deadline(
+                            date=jrow["deadline_date"] or None,
+                            inferred=bool(jrow["deadline_inferred"]),
+                        ),
+                        source_evidence=json.loads(jrow["source_evidence"] or "{}"),
+                        confidence=jrow["confidence"] or 0,
+                    )
+                    rj = MatchedJob(
+                        job=rjob, match_score=0, match_reasons=[],
+                        account_name=art["account_name"],
+                    )
+                    review_jobs.append(rj)
+            else:
+                # 无 jobs 的 need_review 文章(如 OCR 质量过低)
+                rjob = DJob(
+                    company_name=None, job_name=art["title"], location=None,
+                    apply_channel=None, email=None, email_chars=[],
+                    deadline=Deadline(date=None, inferred=False),
+                    source_evidence={"_warnings": ["need_review: OCR 质量过低"]},
+                    confidence=0,
+                )
+                rj = MatchedJob(
+                    job=rjob, match_score=0, match_reasons=[],
+                    account_name=art["account_name"],
+                )
+                review_jobs.append(rj)
+
+        shown = matched_jobs[: self.rules.notify.max_per_run]
+        shown_ids = job_ids[: self.rules.notify.max_per_run]
+
+        # 构建结构化 Markdown 并推送到各平台
+        results: list[NotifyResult] = []
+        if self.config_loader.get_feishu_webhook():
+            md = self.notifier.build_structured_markdown(
+                date=_today_str(),
+                matched_jobs=shown,
+                review_jobs=review_jobs,
+                total_fetched=fetched_count,
+                total_candidates=candidate_count,
+                platform="feishu",
+            )
+            results.append(self.notifier._send_feishu(md))
+        if self.config_loader.get_dingtalk_webhook():
+            md = self.notifier.build_structured_markdown(
+                date=_today_str(),
+                matched_jobs=shown,
+                review_jobs=review_jobs,
+                total_fetched=fetched_count,
+                total_candidates=candidate_count,
+                platform="dingtalk",
+            )
+            results.append(self.notifier._send_dingtalk(md))
+
+        if not results:
+            logger.warning("未配置任何 Webhook")
+            return
+
+        any_success = any(r.success for r in results)
+        if any_success and shown_ids:
+            # 标记已通知
+            self.repo.mark_jobs_notified(shown_ids)
+            # 将相关 MATCHED 文章归档
+            notified_article_ids = set()
+            for row in jobs_rows[: self.rules.notify.max_per_run]:
+                notified_article_ids.add(row["article_id"])
+            for aid in notified_article_ids:
+                try:
+                    art = self.repo.get_article(aid)
+                    if art and art["status"] == Status.MATCHED.value:
+                        self.repo.force_status(aid, Status.ARCHIVED)
+                except Exception as e:
+                    logger.warning(f"归档失败: {aid[:8]} — {e}")
+            logger.info(
+                f"推送成功: 展示 {len(shown_ids)} 个岗位, "
+                f"复核 {len(review_jobs)} 项"
+            )
+        elif any_success:
+            logger.info("推送成功(无命中岗位,仅空提示或复核区)")
         else:
-            logger.error(f"推送失败: {result.message}")
+            logger.error(
+                f"推送失败: {'; '.join(r.message for r in results)}"
+            )
 
     def check_cookie(self) -> bool:
         """检查 Cookie 有效性(调用微信 API 验证)"""

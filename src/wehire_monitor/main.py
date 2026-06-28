@@ -28,7 +28,7 @@ logger.add(
 
 app = typer.Typer(
     name="wehire-monitor",
-    help="微信公众号招聘情报监控管道 (v0.1 MVP)",
+    help="微信公众号招聘情报监控管道 (v0.2)",
     no_args_is_help=True,
 )
 
@@ -165,7 +165,7 @@ def extract(
     logger.info("执行提取阶段")
     with PipelineRunner(
         db_path=db, config_dir=config_dir, dry_run=False,
-        stages={"extract", "match"},
+        stages={"extract"},
     ) as runner:
         runner.run()
 
