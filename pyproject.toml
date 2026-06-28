@@ -17,6 +17,7 @@ dependencies = [
     "python-dotenv>=1",
     "typer>=0.12",
     "loguru>=0.7",
+    "rapidocr-onnxruntime>=1.3",
 ]
 
 [project.scripts]
