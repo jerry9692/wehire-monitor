@@ -1,6 +1,6 @@
 """配置加载与校验"""
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import yaml
@@ -66,33 +66,30 @@ class ConfigLoader:
     def is_cookie_stale(self, max_age_hours: float = 24.0) -> bool:
         """检测 Cookie 是否过期(超过 max_age_hours 小时)
 
-        COOKIE_UPDATED_AT 支持两种格式:
-        - ISO8601 带时区: 2026-06-28T08:00:00+08:00 (推荐)
-        - 本地时间格式: 2026-06-28 08:00:00 (按 Asia/Shanghai 解释)
+        COOKIE_UPDATED_AT 支持以下格式(均按 Asia/Shanghai 解释,除非显式带时区):
+        - ISO8601 带时区: 2026-06-28T08:00:00+08:00
+        - ISO8601 带Z: 2026-06-28T00:00:00Z
+        - ISO8601 无时区: 2026-06-28T08:00:00 → 按 Asia/Shanghai
+        - 本地时间格式: 2026-06-28 08:00:00 → 按 Asia/Shanghai
         """
         updated_str = os.environ.get("COOKIE_UPDATED_AT")
         if not updated_str:
             logger.warning("COOKIE_UPDATED_AT 未设置,视为过期")
             return True
         try:
-            # 先尝试 ISO8601 带时区
-            if "T" in updated_str or "+" in updated_str or updated_str.endswith("Z"):
-                updated = datetime.fromisoformat(updated_str.replace("Z", "+00:00"))
-                if updated.tzinfo is None:
-                    updated = updated.replace(tzinfo=timezone.utc)
-            else:
-                # 无时区标记 → 按本地时间(Asia/Shanghai, UTC+8)解释
-                from zoneinfo import ZoneInfo
-                naive = datetime.strptime(updated_str, "%Y-%m-%d %H:%M:%S")
-                updated = naive.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
-        except (ValueError, ImportError):
-            try:
-                # 兜底:无时区信息,按本地时区解析
-                naive = datetime.strptime(updated_str, "%Y-%m-%d %H:%M:%S")
-                updated = naive.astimezone()  # 使用系统本地时区
-            except ValueError:
-                logger.warning(f"COOKIE_UPDATED_AT 格式无效: {updated_str}")
-                return True
+            # 统一用 fromisoformat 解析(Python 3.11+ 支持 Z 后缀)
+            normalized = updated_str.replace("Z", "+00:00")
+            updated = datetime.fromisoformat(normalized)
+            # 无时区信息 → 按 Asia/Shanghai 解释
+            if updated.tzinfo is None:
+                try:
+                    from zoneinfo import ZoneInfo
+                    updated = updated.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+                except ImportError:
+                    updated = updated.replace(tzinfo=timezone(timedelta(hours=8)))
+        except ValueError:
+            logger.warning(f"COOKIE_UPDATED_AT 格式无效: {updated_str}")
+            return True
         now = datetime.now(timezone.utc)
         age = (now - updated.astimezone(timezone.utc)).total_seconds() / 3600
         if age > max_age_hours:
@@ -107,6 +104,9 @@ class ConfigLoader:
             missing.append("WECHAT_MP_COOKIE")
         if not self.get_token():
             missing.append("WECHAT_MP_TOKEN")
+        # 至少配置一个通知渠道
+        if not self.get_feishu_webhook() and not self.get_dingtalk_webhook():
+            missing.append("FEISHU_WEBHOOK 或 DINGTALK_WEBHOOK")
         return missing
 
     def get_cookie(self) -> str:

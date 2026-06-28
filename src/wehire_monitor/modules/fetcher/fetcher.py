@@ -69,8 +69,18 @@ class Fetcher:
         referer = "https://mp.weixin.qq.com/"
         if "appmsg" in url:
             referer = "https://mp.weixin.qq.com/cgi-bin/appmsg"
+        elif "searchbiz" in url:
+            referer = "https://mp.weixin.qq.com/cgi-bin/searchbiz"
         resp = self._client.get(url, params=params, headers={"Referer": referer})
+
+        # 检测 HTTP 限流(403/429)→ RateLimitedError,不要抛 HTTPStatusError
+        if resp.status_code in (403, 429):
+            raise RateLimitedError(f"HTTP {resp.status_code} 被限流")
         resp.raise_for_status()
+
+        # 检测空响应 → 限流(不是 Cookie 失效)
+        if not resp.text.strip():
+            raise RateLimitedError("空响应,可能被限流")
 
         # 检测是否返回 HTML 登录页(Cookie 失效的标志)
         content_type = resp.headers.get("content-type", "")
@@ -101,15 +111,25 @@ class Fetcher:
     def check_cookie(self) -> CookieStatus:
         """检测 Cookie 有效性(API 级验证)"""
         from datetime import datetime, timezone as _tz
+        nickname = ""
+        message = ""
         try:
             data = self._request(
                 _MP_SEARCH_URL,
                 {"action": "search_biz", "query": "test", "begin": 0, "count": 1},
             )
             is_valid = data.get("base_resp", {}).get("ret", 0) == 0
-        except (CookieInvalidError, CaptchaRequiredError, RateLimitedError, httpx.HTTPError) as e:
+            if is_valid:
+                # 尝试提取账号信息
+                accounts = data.get("list", [])
+                if accounts:
+                    nickname = accounts[0].get("nickname", "")
+            else:
+                message = f"接口返回 ret={data.get('base_resp', {}).get('ret')}"
+        except (CookieInvalidError, CaptchaRequiredError, RateLimitedError, httpx.HTTPError, FetcherError) as e:
             logger.warning(f"Cookie 检测失败: {e}")
             is_valid = False
+            message = str(e)
 
         # 从环境变量获取更新时间
         import os
@@ -131,11 +151,21 @@ class Fetcher:
             is_valid=is_valid,
             updated_at=updated_str,
             age_hours=age,
+            nickname=nickname,
+            message=message,
         )
 
     def search_account(self, name: str, alias: list[str], max_articles: int = 10) -> dict[str, str]:
-        """搜索公众号,优先精确匹配 name,回退 alias,返回 {fakeid, nickname}"""
+        """搜索公众号,优先精确匹配 name,回退 alias,全部无精确匹配时取首个结果
+
+        流程:
+        1. 遍历 [name] + alias,对每个关键词搜索并尝试精确匹配
+        2. 精确匹配成功立即返回
+        3. 全部关键词都无精确匹配时,取首个非空搜索结果的首条记录
+        """
         keywords = [name] + [a for a in alias if a]
+        first_result: dict[str, str] | None = None  # 记录首个非空搜索结果
+
         for kw in keywords:
             self.search_limiter.wait()
             data = self._request(
@@ -149,13 +179,23 @@ class Fetcher:
             # 优先精确匹配昵称
             for acc in accounts:
                 if acc.get("nickname", "") == kw:
-                    logger.info(f"精确匹配公众号: {acc['nickname']} (fakeid={acc['fakeid']})")
-                    return {"fakeid": acc["fakeid"], "nickname": acc["nickname"]}
+                    logger.info(f"精确匹配公众号: {acc.get('nickname')} (fakeid={acc.get('fakeid')})")
+                    return {
+                        "fakeid": acc.get("fakeid", ""),
+                        "nickname": acc.get("nickname", ""),
+                    }
 
-            # 回退到第一个结果,记录警告
-            first = accounts[0]
-            logger.warning(f"未精确匹配 '{kw}',使用第一个结果: {first['nickname']}")
-            return {"fakeid": first["fakeid"], "nickname": first["nickname"]}
+            # 记录首个非空搜索结果(用于最终回退)
+            if first_result is None:
+                first_result = {
+                    "fakeid": accounts[0].get("fakeid", ""),
+                    "nickname": accounts[0].get("nickname", ""),
+                }
+
+        # 所有关键词都无精确匹配,回退到首个搜索结果
+        if first_result is not None:
+            logger.warning(f"未精确匹配 '{name}',使用首个搜索结果: {first_result['nickname']}")
+            return first_result
 
         raise AccountNotFoundError(f"未找到公众号: {name} (alias={alias})")
 

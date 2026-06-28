@@ -28,19 +28,44 @@ def test_load_rules(sample_rules_yaml):
 
 
 def test_cookie_age_check_alerts_when_stale(monkeypatch):
-    """Cookie 超过 24h 应返回需告警"""
-    stale_time = (datetime.now(timezone.utc) - timedelta(hours=25)).strftime("%Y-%m-%d %H:%M:%S")
+    """Cookie 超过 24h 应返回需告警(使用上海时区时间)"""
+    from zoneinfo import ZoneInfo
+    tz_sh = ZoneInfo("Asia/Shanghai")
+    stale_time = (datetime.now(tz_sh) - timedelta(hours=25)).strftime("%Y-%m-%d %H:%M:%S")
     monkeypatch.setenv("COOKIE_UPDATED_AT", stale_time)
     loader = ConfigLoader()
     assert loader.is_cookie_stale() is True
 
 
 def test_cookie_age_check_ok_when_fresh(monkeypatch):
-    """Cookie 在 24h 内不应告警"""
-    fresh_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    """Cookie 在 24h 内不应告警(使用上海时区时间)"""
+    from zoneinfo import ZoneInfo
+    tz_sh = ZoneInfo("Asia/Shanghai")
+    fresh_time = datetime.now(tz_sh).strftime("%Y-%m-%d %H:%M:%S")
     monkeypatch.setenv("COOKIE_UPDATED_AT", fresh_time)
     loader = ConfigLoader()
     assert loader.is_cookie_stale() is False
+
+
+def test_cookie_age_check_timezone_consistency(monkeypatch):
+    """同一时刻用 ISO8601+时区 和 空格格式(上海时间) 应得到接近一致的结果"""
+    from zoneinfo import ZoneInfo
+    tz_sh = ZoneInfo("Asia/Shanghai")
+    now_sh = datetime.now(tz_sh) - timedelta(hours=12)
+
+    # 方式1: ISO8601 带时区
+    iso_str = now_sh.isoformat()
+    monkeypatch.setenv("COOKIE_UPDATED_AT", iso_str)
+    loader1 = ConfigLoader()
+    result1 = loader1.is_cookie_stale()
+
+    # 方式2: 空格格式(上海时间)
+    space_str = now_sh.strftime("%Y-%m-%d %H:%M:%S")
+    monkeypatch.setenv("COOKIE_UPDATED_AT", space_str)
+    loader2 = ConfigLoader()
+    result2 = loader2.is_cookie_stale()
+
+    assert result1 == result2  # 两种格式应产生一致结果
 
 
 def test_cookie_age_check_handles_missing(monkeypatch):

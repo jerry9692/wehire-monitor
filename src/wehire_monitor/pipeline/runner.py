@@ -11,8 +11,6 @@
 """
 import hashlib
 import json
-import os
-import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -126,13 +124,14 @@ class PipelineRunner:
 
         self.fetcher: Fetcher | None = None
 
-        # 非 dry-run 模式下校验必要配置
+        # 非 dry-run 且含 fetch 阶段时校验必要配置(抛异常而非 sys.exit,确保资源清理)
         if not self.dry_run and "fetch" in self.stages:
             missing = self.config_loader.validate_required_config()
             if missing:
-                logger.error(f"缺少必要配置项: {', '.join(missing)}")
-                logger.error("请在 config/.env 中配置后重试")
-                sys.exit(1)
+                self.close()
+                raise CookieInvalidError(
+                    f"缺少必要配置项: {', '.join(missing)},请在 config/.env 中配置后重试"
+                )
 
     def _resolve_paths(self, db_path: str, data_dir: str, config_dir: str | None) -> None:
         """将相对路径解析为基于项目根目录的绝对路径"""
@@ -202,12 +201,15 @@ class PipelineRunner:
             else:
                 all_articles = result["articles"]
                 fetched_count = len(all_articles)
-        elif self.dry_run:
-            logger.info("dry-run 模式:跳过 HTTP 抓取")
-            # dry-run 模式下加载已入库的待处理文章(DISCOVERED/FETCHED/PARSED)继续后续阶段
+        elif self.dry_run or "fetch" not in self.stages:
+            # dry-run 或不含 fetch 阶段:跳过 HTTP 抓取,加载已入库的待处理文章
+            if self.dry_run:
+                logger.info("dry-run 模式:跳过 HTTP 抓取")
+            else:
+                logger.info("跳过抓取阶段,加载已入库的待处理文章")
             pending = self.repo.query_pending_articles()
             if pending:
-                logger.info(f"dry-run:发现 {len(pending)} 篇待处理文章,继续解析/预过滤")
+                logger.info(f"发现 {len(pending)} 篇待处理文章,继续解析/预过滤")
                 for row in pending:
                     all_articles.append(ArticleMeta(
                         account_name=row["account_name"],
@@ -215,7 +217,7 @@ class PipelineRunner:
                         url=row["url"],
                         publish_time=datetime.fromisoformat(row["publish_time"]),
                     ))
-            else:
+            elif self.dry_run:
                 logger.info("dry-run:无待处理文章,仅验证配置")
 
         if not fatal_error:
@@ -269,16 +271,15 @@ class PipelineRunner:
         for account in accounts:
             if not account.enabled:
                 continue
-            if len(all_articles) >= max_total:
+            remaining = max_total - len(all_articles)
+            if remaining <= 0:
                 logger.info(f"已达全局上限 {max_total} 篇,停止抓取")
                 break
             try:
-                new_articles = self._fetch_account(account)
+                new_articles = self._fetch_account(account, max_new=remaining)
                 all_articles.extend(new_articles)
-                # 全局数量限制
                 if len(all_articles) >= max_total:
-                    all_articles = all_articles[:max_total]
-                    logger.info(f"已达全局上限 {max_total} 篇,截断")
+                    logger.info(f"已达全局上限 {max_total} 篇,停止抓取")
                     break
             except (CookieInvalidError, CaptchaRequiredError) as e:
                 logger.error(f"致命错误,停止抓取: {e}")
@@ -295,8 +296,8 @@ class PipelineRunner:
 
         return {"articles": all_articles, "fatal": fatal, "error": error}
 
-    def _fetch_account(self, account: AccountConfig) -> list[ArticleMeta]:
-        """抓取单个公众号"""
+    def _fetch_account(self, account: AccountConfig, max_new: int = 80) -> list[ArticleMeta]:
+        """抓取单个公众号,最多返回 max_new 篇新文章(超出的不入库)"""
         assert self.fetcher is not None
         logger.info(f"抓取公众号: {account.name} (priority={account.priority})")
         account_meta = self.fetcher.search_account(
@@ -310,16 +311,16 @@ class PipelineRunner:
             max_count=self.rules.schedule.max_articles_per_account,
         )
 
-        # URL 去重 + content_hash 去重
+        # URL 去重 + 入库(仅入配额内的,超出配额的不入库避免卡死 DISCOVERED)
         new_articles: list[ArticleMeta] = []
-        seen_hashes: set[str] = set()
         for a in articles:
+            if len(new_articles) >= max_new:
+                logger.debug(f"已达单号配额 {max_new},剩余文章下次处理")
+                break
             url_hash = _url_hash(a.url)
             if self.repo.is_url_seen(url_hash):
                 logger.debug(f"URL 已存在,跳过: {a.title}")
                 continue
-            # content_hash 去重需要先解析,这里只做 URL 级别
-            # (content_hash 去重在 _process_articles 解析后进行)
             if not self.dry_run:
                 self.repo.upsert_article(
                     article_id=url_hash,
@@ -343,13 +344,23 @@ class PipelineRunner:
             url_hash = _url_hash(meta.url)
             article = None
             try:
-                # 先标记 DISCOVERED → FETCHED(HTML 下载开始)
+                # 状态迁移:DISCOVERED→FETCHED 或 ERROR_*→FETCHED(重试)
                 if not self.dry_run:
                     article = self.repo.get_article(url_hash)
-                    if article and article["status"] == Status.DISCOVERED.value:
-                        try:
-                            self.repo.transition(url_hash, Status.DISCOVERED, Status.FETCHED)
-                        except ValueError:
+                    if article:
+                        current_status = article["status"]
+                        if current_status == Status.DISCOVERED.value:
+                            try:
+                                self.repo.transition(url_hash, Status.DISCOVERED, Status.FETCHED)
+                            except ValueError:
+                                self.repo.force_status(url_hash, Status.FETCHED)
+                        elif current_status in (
+                            Status.ERROR_FETCH.value,
+                            Status.ERROR_PARSE.value,
+                            Status.FETCHED.value,
+                            Status.PARSED.value,
+                        ):
+                            # 重试:直接 force 到 FETCHED 重新走解析流程
                             self.repo.force_status(url_hash, Status.FETCHED)
 
                 # 解析(包含 HTML 下载)

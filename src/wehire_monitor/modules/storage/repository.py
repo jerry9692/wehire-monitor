@@ -157,11 +157,13 @@ class Repository:
         return [dict(row) for row in cursor.fetchall()]
 
     def query_pending_articles(self) -> list[dict[str, Any]]:
-        """查询所有处于中间状态的文章(支持断点续跑)"""
+        """查询所有处于中间状态或错误状态的文章(支持断点续跑和重试)"""
         pending_statuses = (
             Status.DISCOVERED.value,
             Status.FETCHED.value,
             Status.PARSED.value,
+            Status.ERROR_FETCH.value,
+            Status.ERROR_PARSE.value,
         )
         placeholders = ",".join("?" * len(pending_statuses))
         cursor = self.conn.execute(

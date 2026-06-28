@@ -8,6 +8,8 @@ from wehire_monitor.modules.fetcher.exceptions import (
     CookieInvalidError,
     CaptchaRequiredError,
     AccountNotFoundError,
+    RateLimitedError,
+    FetcherError,
 )
 from wehire_monitor.domain.models import CookieStatus
 
@@ -96,4 +98,66 @@ def test_list_articles_filters_by_time_window():
         )
         assert len(articles) == 1
         assert articles[0].title == "新文章"
+    fetcher.close()
+
+
+def test_search_account_alias_fallback_when_name_has_no_exact_match():
+    """name 搜索有结果但无精确匹配时,应继续尝试 alias 精确匹配"""
+    fetcher = Fetcher(cookie="abc", token="tok", user_agent="UA")
+    call_count = [0]
+
+    def mock_response(url, params):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            # name 搜索有结果但无精确匹配
+            return {"list": [{"fakeid": "f0", "nickname": "无关公众号"}]}
+        # alias 搜索有精确匹配
+        return {"list": [{"fakeid": "f1", "nickname": "国资招聘"}]}
+
+    with patch.object(fetcher, "_request", side_effect=mock_response):
+        meta = fetcher.search_account("上海国资招聘", ["国资招聘"])
+        assert meta["fakeid"] == "f1"
+        assert meta["nickname"] == "国资招聘"
+    fetcher.close()
+
+
+def test_request_detects_http_429_as_rate_limited():
+    """HTTP 429 应检测为 RateLimitedError 而非 HTTPStatusError"""
+    import httpx
+    fetcher = Fetcher(cookie="abc", token="tok", user_agent="UA")
+    mock_resp = MagicMock()
+    mock_resp.status_code = 429
+    mock_resp.text = ""
+    mock_resp.headers = {"content-type": "application/json"}
+    with patch.object(fetcher._client, "get", return_value=mock_resp):
+        with pytest.raises(RateLimitedError):
+            fetcher._request("https://mp.weixin.qq.com/cgi-bin/searchbiz", {"action": "search_biz"})
+    fetcher.close()
+
+
+def test_request_detects_empty_response_as_rate_limited():
+    """空响应应检测为 RateLimitedError 而非 CookieInvalidError"""
+    fetcher = Fetcher(cookie="abc", token="tok", user_agent="UA")
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.text = "   "
+    mock_resp.headers = {"content-type": "application/json"}
+    with patch.object(fetcher._client, "get", return_value=mock_resp):
+        with pytest.raises(RateLimitedError):
+            fetcher._request("https://mp.weixin.qq.com/cgi-bin/searchbiz", {"action": "search_biz"})
+    fetcher.close()
+
+
+def test_check_cookie_returns_nickname_and_message():
+    """check_cookie 返回的 CookieStatus 应包含 nickname/message 字段"""
+    fetcher = Fetcher(cookie="abc", token="tok", user_agent="UA")
+    with patch.object(fetcher, "_request") as mock_req:
+        mock_req.return_value = {
+            "base_resp": {"ret": 0},
+            "list": [{"fakeid": "f1", "nickname": "测试公众号"}],
+        }
+        status = fetcher.check_cookie()
+        assert status.is_valid is True
+        assert status.nickname == "测试公众号"
+        assert status.message == ""
     fetcher.close()

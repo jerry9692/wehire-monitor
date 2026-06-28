@@ -78,9 +78,15 @@ class Notifier:
         return f"- [{item.title}]({item.url}) — {item.account_name}"
 
     def build_markdown(self, report: DailyReport, platform: Literal["feishu", "dingtalk"] = "dingtalk") -> str:
-        """构建 Markdown 日报内容(列表格式,不使用表格)"""
+        """构建 Markdown 日报内容(列表格式,不使用表格)
+
+        飞书 Markdown 组件不支持 ## 标题和 > 引用,用加粗文本替代。
+        """
+        # 飞书用加粗替代 ## 标题
+        title_prefix = "**" if platform == "feishu" else "## "
+        title_suffix = "**" if platform == "feishu" else ""
         lines = [
-            f"## 今日精准招聘日报｜{report.date}",
+            f"{title_prefix}今日精准招聘日报｜{report.date}{title_suffix}",
             "",
             f"抓取 {report.total_fetched} 篇，候选 {report.total_candidates} 篇。",
             "",
@@ -98,7 +104,11 @@ class Notifier:
             lines.append(self._build_item_line(item))
 
         if len(report.items) > self.max_per_run:
-            lines.append(f"\n> 还有 {len(report.items) - self.max_per_run} 条未展示，将在下次推送")
+            # 飞书不支持 > 引用,用普通文本
+            extra = f"\n还有 {len(report.items) - self.max_per_run} 条未展示，将在下次推送"
+            if platform == "feishu":
+                extra = f"\n{extra.strip()}"
+            lines.append(extra)
 
         return "\n".join(lines)
 
@@ -123,11 +133,13 @@ class Notifier:
             logger.warning("未配置任何 Webhook")
             return NotifyResult(success=False, pushed_count=0, message="no webhook configured")
 
+        # 任一渠道成功即视为推送成功(避免部分失败导致重复推送)
+        any_success = any(r.success for r in results)
         all_success = all(r.success for r in results)
         return NotifyResult(
-            success=all_success,
-            pushed_count=shown_count if all_success else 0,
-            message="; ".join(r.message for r in results),
+            success=any_success,
+            pushed_count=shown_count if any_success else 0,
+            message="; ".join(r.message for r in results) + ("" if all_success else " (部分渠道失败)"),
         )
 
     def send_alert(self, title: str, message: str) -> NotifyResult:
@@ -135,25 +147,26 @@ class Notifier:
         alert_md = f"⚠️ **{title}**\n\n{message}"
         results: list[NotifyResult] = []
         if self.feishu_webhook:
-            results.append(self._send_feishu(alert_md))
+            results.append(self._send_feishu(alert_md, card_title=title))
         if self.dingtalk_webhook:
-            results.append(self._send_dingtalk(alert_md))
+            results.append(self._send_dingtalk(alert_md, msg_title=title))
         if not results:
             return NotifyResult(success=False, pushed_count=0, message="no webhook configured")
+        any_success = any(r.success for r in results)
         return NotifyResult(
-            success=all(r.success for r in results),
+            success=any_success,
             pushed_count=0,
             message="; ".join(r.message for r in results),
         )
 
-    def _send_feishu(self, md_content: str) -> NotifyResult:
+    def _send_feishu(self, md_content: str, card_title: str = "招聘监控日报") -> NotifyResult:
         """推送飞书(interactive card 带 header)"""
         try:
             payload = {
                 "msg_type": "interactive",
                 "card": {
                     "header": {
-                        "title": {"tag": "plain_text", "content": "招聘监控日报"},
+                        "title": {"tag": "plain_text", "content": card_title},
                         "template": "blue",
                     },
                     "elements": [
@@ -167,7 +180,10 @@ class Notifier:
             resp = self._client.post(self.feishu_webhook, json=payload)
             resp.raise_for_status()
             data = resp.json()
-            if data.get("code", 0) == 0 or data.get("StatusCode", 0) == 0:
+            # 飞书成功时 code=0 或 StatusCode=0;要求字段必须存在且为 0
+            code = data.get("code")
+            status_code = data.get("StatusCode")
+            if (code is not None and code == 0) or (status_code is not None and status_code == 0):
                 logger.info("飞书推送成功")
                 return NotifyResult(success=True, message="feishu ok")
             return NotifyResult(success=False, message=f"feishu error: {data}")
@@ -178,20 +194,22 @@ class Notifier:
             logger.error(f"飞书推送数据错误: {e}")
             return NotifyResult(success=False, message=f"feishu data error: {e}")
 
-    def _send_dingtalk(self, md_content: str) -> NotifyResult:
+    def _send_dingtalk(self, md_content: str, msg_title: str = "招聘监控日报") -> NotifyResult:
         """推送钉钉(markdown 消息类型)"""
         try:
             payload = {
                 "msgtype": "markdown",
                 "markdown": {
-                    "title": "招聘监控日报",
+                    "title": msg_title,
                     "text": md_content,
                 },
             }
             resp = self._client.post(self.dingtalk_webhook, json=payload)
             resp.raise_for_status()
             data = resp.json()
-            if data.get("errcode", 0) == 0:
+            # 钉钉成功时 errcode=0;要求字段必须存在且为 0
+            errcode = data.get("errcode")
+            if errcode is not None and errcode == 0:
                 logger.info("钉钉推送成功")
                 return NotifyResult(success=True, message="dingtalk ok")
             return NotifyResult(success=False, message=f"dingtalk error: {data}")

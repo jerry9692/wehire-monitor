@@ -64,3 +64,42 @@ def test_max_per_run_limit():
     assert "标题0" in md
     assert "标题1" in md
     assert "标题2" not in md
+
+
+def test_partial_webhook_success_treated_as_success():
+    """飞书成功钉钉失败时,整体应判为成功(避免重复推送)"""
+    notifier = Notifier(
+        feishu_webhook="https://open.feishu.cn/hook/xxx",
+        dingtalk_webhook="https://oapi.dingtalk.com/robot/send?access_token=xxx",
+        max_per_run=5,
+    )
+    report = DailyReport(
+        date="2026-06-28",
+        items=[ReportItem(title="测试", url="https://x.com", account_name="号")],
+        total_fetched=1,
+        total_candidates=1,
+    )
+
+    def mock_post(url, json=None):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        if "feishu" in url:
+            mock_resp.json.return_value = {"code": 0}
+        else:
+            mock_resp.json.return_value = {"errcode": 130101, "errmsg": "rate limited"}
+        return mock_resp
+
+    with patch.object(notifier._client, "post", side_effect=mock_post):
+        result = notifier.send_daily(report)
+        assert result.success is True  # 任一成功即成功
+        assert result.pushed_count == 1
+
+
+def test_feishu_markdown_uses_bold_not_heading():
+    """飞书 Markdown 不应使用 ## 标题(飞书不支持)"""
+    notifier = Notifier(feishu_webhook="https://example.com/hook", dingtalk_webhook=None)
+    report = DailyReport(date="2026-06-28", items=[], total_fetched=0, total_candidates=0)
+    md_feishu = notifier.build_markdown(report, platform="feishu")
+    md_dingtalk = notifier.build_markdown(report, platform="dingtalk")
+    assert "##" not in md_feishu  # 飞书不应有 ##
+    assert "##" in md_dingtalk     # 钉钉可以用 ##

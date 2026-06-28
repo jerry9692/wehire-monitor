@@ -50,6 +50,8 @@ class CookieStatus:
     is_valid: bool
     updated_at: str          # ISO8601
     age_hours: float
+    nickname: str = ""       # Cookie 对应的账号昵称(有效时)
+    message: str = ""        # 附加信息(无效时给出原因)
 
 
 @dataclass
