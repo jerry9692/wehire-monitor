@@ -104,9 +104,6 @@ class ConfigLoader:
             missing.append("WECHAT_MP_COOKIE")
         if not self.get_token():
             missing.append("WECHAT_MP_TOKEN")
-        # 至少配置一个通知渠道
-        if not self.get_feishu_webhook() and not self.get_dingtalk_webhook():
-            missing.append("FEISHU_WEBHOOK 或 DINGTALK_WEBHOOK")
         return missing
 
     def get_cookie(self) -> str:

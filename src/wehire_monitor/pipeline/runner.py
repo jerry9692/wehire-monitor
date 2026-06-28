@@ -124,13 +124,20 @@ class PipelineRunner:
 
         self.fetcher: Fetcher | None = None
 
-        # 非 dry-run 且含 fetch 阶段时校验必要配置(抛异常而非 sys.exit,确保资源清理)
+        # 非 dry-run 且含 fetch 阶段时校验 Cookie/Token(抛异常而非 sys.exit,确保资源清理)
         if not self.dry_run and "fetch" in self.stages:
             missing = self.config_loader.validate_required_config()
             if missing:
                 self.close()
                 raise CookieInvalidError(
                     f"缺少必要配置项: {', '.join(missing)},请在 config/.env 中配置后重试"
+                )
+        # 含 notify 阶段时校验至少一个 webhook
+        if "notify" in self.stages and not self.dry_run:
+            if not self.config_loader.get_feishu_webhook() and not self.config_loader.get_dingtalk_webhook():
+                self.close()
+                raise ValueError(
+                    "推送阶段需要配置 FEISHU_WEBHOOK 或 DINGTALK_WEBHOOK,请在 config/.env 中配置后重试"
                 )
 
     def _resolve_paths(self, db_path: str, data_dir: str, config_dir: str | None) -> None:

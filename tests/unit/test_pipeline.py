@@ -48,7 +48,7 @@ def test_single_article_failure_does_not_stop_batch(tmp_db_path, sample_accounts
         accounts_path=sample_accounts_yaml,
         rules_path=sample_rules_yaml,
         dry_run=False,
-        stages={"parse", "prefilter", "notify"},
+        stages={"parse", "prefilter"},  # 不含 fetch/notify,避免配置校验
     )
     # 设置有命中词的 keywords
     runner.prefilter.hit_words = ["招聘", "岗位", "投递", "报名", "简历"]
