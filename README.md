@@ -10,18 +10,23 @@
 
 非商业爬虫平台,不追求高并发/账号池/代理池,不自动登录,不绕强风控。一个低频、轻量、可人工维护的本地自动化管道。
 
-> **v0.2** — 当前版本实现:抓取→解析→预过滤→OCR+LLM 结构化提取→规则匹配→Markdown 表格日报推送。长图切片+Vision兜底(v0.3)、看板周报(v1.0)正在规划中。
+> **v0.3** — 当前版本实现:抓取→解析→预过滤→OCR+LLM+VLM 三路结构化提取→规则匹配→Markdown 表格日报推送。支持长图切片、短图拼接、VLM 视觉兜底、每日预算上限、人工复核队列。看板周报(v1.0)正在规划中。
 
 ---
 
-## 核心价值(v0.2)
+## 核心价值(v0.3)
 
 - **自动抓取**:定时(每日 08:30/20:30)抓取配置的公众号最新文章,限频防封
 - **智能过滤**:关键词评分门控,自动过滤实习/校招/非招聘内容
-- **结构化提取**:OCR(RapidOCR)+ 文本 LLM(DeepSeek)双路提取公司/岗位/地点/投递方式/截止日期
+- **三路提取**:文本 LLM(高质量正文)→ OCR+LLM(图片海报)→ VLM 切片提取(长图/低质量图),自动选择最优路径
+- **图片拼接**:检测发布者将长图裁剪为多张短图的场景,自动拼接还原(重叠检测+感知哈希去重)
+- **长图切片**:超长招聘海报自动切片(1800px/220px 重叠),VLM 逐片提取后合并去重
+- **预算控制**:每日 VLM 花费硬上限,耗尽后剩余文章进人工复核队列
 - **规则匹配**:加权评分(公司/岗位关键词/地点),置信度门控,低置信度进复核区
+- **人工复核**:`review` CLI 命令查看/批准/拒绝 NEED_REVIEW 文章
 - **双重去重**:URL hash + 正文 hash,避免重复入库和重复推送
 - **结构化日报**:Markdown 表格日报 + "需人工复核"区 + 邮箱脱敏
+- **运行统计**:`run --stats` 查看最近运行记录(含 VLM 调用数和成本估算)
 - **状态可控**:状态机驱动,单篇失败不影响整批,支持断点续跑
 - **安全友好**:Cookie/Token 本地存储,配置校验,资源自动清理
 
@@ -57,10 +62,21 @@
 - `extract` / `match` CLI 命令独立运行
 - run_logs 记录 llm_count/ocr_count
 
-### v0.3+ 规划中
+### v0.3 已实现 ✅
 
-- 长图切片 + Vision API 兜底
-- 预算控制(每日 VLM 花费上限)
+- VLM(Qwen-VL-Max via DashScope)视觉提取:招聘海报图片直接送 VLM 识别岗位信息
+- 长图切片:超长图片(>2200px)自动切片(1800px/220px 重叠),VLM 逐片提取后合并去重
+- 短图拼接:检测发布者将长图裁剪为多张短图的场景,自动拼接还原(感知哈希去重+重叠检测+SVG 跳过)
+- 三路提取切换:文本 LLM(正文≥500字)→ OCR+LLM(图片质量≥0.72)→ VLM 切片(低质量/长图)
+- 每日 VLM 预算硬上限(`daily_vlm_budget_cny`),耗尽后剩余文章进 NEED_REVIEW
+- `review` CLI 命令:查看/批准/拒绝人工复核队列中的文章
+- `run --stats` 查看最近运行记录(含 vlm_count/cost_estimate)
+- run_logs 记录 vlm_count 和 cost_estimate
+- 切片岗位合并去重(公司+岗位+地点 key,email 冲突检测)
+- Provider 抽象层扩展(VLM 接口+工厂,.env 切换)
+
+### v1.0+ 规划中
+
 - 本地 HTML 看板、周报统计
 - 错误告警、一键重跑
 - Docker 部署
@@ -73,8 +89,10 @@
 | 包管理 | `uv` |
 | HTTP | `httpx` |
 | HTML 解析 | `beautifulsoup4` + `lxml` |
-| 图片处理 | `Pillow`(预留 `imagehash`) |
+| 图片处理 | `Pillow` + `imagehash`(感知哈希去重) |
 | OCR | `rapidocr-onnxruntime`(v0.2) |
+| VLM | `Qwen-VL-Max` via DashScope OpenAI 兼容接口(v0.3) |
+| LLM | `DeepSeek` via OpenAI 兼容接口 |
 | 数据校验 | `pydantic` v2 |
 | 存储 | `sqlite3`(标准库) |
 | 调度 | `apscheduler` |
@@ -91,8 +109,10 @@
 配置层 → 调度器 → fetcher → parser → prefilter → [extractor → matcher v0.2+] → storage → notifier
 ```
 
-v0.2 状态机:`discovered → fetched → parsed → candidate → extracted → validated → matched → notified → archived`
-错误分支:`error_fetch` / `error_parse` / `error_ocr` / `error_llm` / `need_cookie` / `need_captcha` / `need_review`。
+状态机:`discovered → fetched → parsed → candidate → extracted → matched → notified → archived`
+错误分支:`error_fetch` / `error_parse` / `error_ocr` / `error_llm` / `need_review`。
+
+v0.3 三路提取:`正文LLM(高质量) → OCR+LLM(中质量) → VLM切片提取(低质量/长图)`,预算耗尽 → need_review。
 
 详细设计见 [`docs/WeHireMonitor-软件需求规格.md`](docs/WeHireMonitor-软件需求规格.md)。
 
@@ -121,18 +141,41 @@ wehire-monitor run --dry-run
 wehire-monitor schedule
 ```
 
+### VLM 配置(v0.3 可选)
+
+VLM 用于处理长图招聘海报,不配置时自动降级为 v0.2 双路(文本LLM+OCR+LLM):
+
+```bash
+# 在 config/.env 中取消注释并填入:
+VLM_PROVIDER=qwen_vl
+VLM_API_KEY=你的DashScope API Key
+VLM_MODEL=qwen-vl-max
+```
+
+在 `config/rules.yaml` 中调整预算:
+
+```yaml
+budget:
+  daily_vlm_budget_cny: 5.0    # 每日 VLM 花费上限(元)
+  max_slices_per_article: 8    # 每篇文章最大切片数
+```
+
 ### CLI 命令
 
 | 命令 | 说明 |
 |---|---|
-| `wehire-monitor run` | 完整管道:抓取→解析→过滤→入库→推送 |
+| `wehire-monitor run` | 完整管道:抓取→解析→过滤→提取→匹配→推送 |
 | `wehire-monitor run --dry-run` | 干跑模式:验证配置,不写库不推送 |
+| `wehire-monitor run --stats` | 查看最近 10 条运行记录(含 VLM 调用数和成本) |
 | `wehire-monitor fetch` | 仅抓取+解析+预过滤(不推送) |
 | `wehire-monitor parse` | 仅解析已入库的待处理文章 |
 | `wehire-monitor prefilter` | 仅预过滤(重新解析+评分) |
-| `wehire-monitor extract` | 仅提取(CANDIDATE 文章 → LLM 结构化岗位) |
+| `wehire-monitor extract` | 仅提取(CANDIDATE 文章 → LLM/OCR/VLM 结构化岗位) |
 | `wehire-monitor match` | 仅匹配(已提取岗位 → 规则评分) |
 | `wehire-monitor notify` | 仅推送当前候选文章 |
+| `wehire-monitor review --list` | 查看 NEED_REVIEW 复核队列 |
+| `wehire-monitor review --approve <id>` | 批准复核文章(→ MATCHED) |
+| `wehire-monitor review --reject <id>` | 拒绝复核文章(→ ARCHIVED) |
 | `wehire-monitor check-cookie` | API 级验证 Cookie 有效性 |
 | `wehire-monitor schedule` | 启动定时调度(阻塞运行) |
 
@@ -162,17 +205,22 @@ wehire-monitor/
       fetcher/             # 微信公众号抓取(搜索/列表/限流/异常检测)
       parser/              # HTML 解析(BS4)、正文/图片提取
       prefilter/           # 关键词评分门控
-      extractor/           # v0.2 OCR+LLM 双路提取、质量评分、后处理
+      extractor/           # v0.3 三路提取(文本LLM/OCR+LLM/VLM切片)+ 质量评分 + 后处理
+                           #   stitcher.py — 短图拼接(感知哈希去重+重叠检测)
+                           #   slicer.py — 长图切片(1800px/220px重叠)
+                           #   budget.py — VLM 预算管理
+                           #   vlm_merge.py — 切片岗位合并去重
       matcher/             # v0.2 用户规则加权匹配
       notifier/            # 飞书/钉钉 Webhook 推送(结构化 Markdown 表格)
       storage/             # SQLite 仓储层(原子状态迁移、jobs 表)
-    providers/             # v0.2 Provider 抽象层(OCR/LLM 接口+工厂)
+    providers/             # Provider 抽象层(OCR/LLM/VLM 接口+工厂)
+      vlm/                 # v0.3 VLM Provider(Qwen-VL-Max via DashScope)
     domain/                # 领域模型(ArticleMeta/ParsedArticle/Job/Status 等)
     config/                # 配置加载与校验(pydantic schema)
     infra/                 # 基础设施(限频器)
     main.py                # Typer CLI 入口
   docs/                    # 需求文档
-  tests/                   # 单元+集成测试(114 tests)
+  tests/                   # 单元+集成测试(189 tests)
   logs/                    # 日志文件(自动轮转,30天保留)
   pyproject.toml
 ```
@@ -183,7 +231,7 @@ wehire-monitor/
 |---|---|---|
 | v0.1 | 能跑通:抓取→过滤→入库→推送标题链接 | ✅ 已完成 |
 | v0.2 | 能提取:OCR + 文本 LLM 结构化岗位表 + Markdown 表格日报 | ✅ 已完成 |
-| v0.3 | 能处理长图:切片 + VLM 兜底 + 预算上限 | 规划中 |
+| v0.3 | 能处理长图:切片 + VLM 兜底 + 短图拼接 + 预算上限 + 人工复核 | ✅ 已完成 |
 | v1.0 | 稳定日用:看板 + 周报 + 告警 + 重跑 + 可选容器化 | 规划中 |
 
 ## 风控与合规
@@ -199,6 +247,7 @@ wehire-monitor/
 - [软件需求规格说明书](docs/WeHireMonitor-软件需求规格.md)
 - [v0.1 MVP 计划](docs/plans/2026-06-28-v0.1-mvp.md)
 - [v0.2 MVP 计划](docs/plans/2026-06-28-v0.2-mvp.md)
+- [v0.3 MVP 计划](docs/plans/2026-06-29-v0.3-mvp.md)
 - [原始 PRD](docs/个人%20AI%20招聘情报监控平台%20PRD.md)
 
 ## 参考项目
