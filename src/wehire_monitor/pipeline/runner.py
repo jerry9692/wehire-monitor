@@ -173,6 +173,9 @@ class PipelineRunner:
                 if hasattr(self.extractor, 'ocr') and self.extractor.ocr is not None \
                         and hasattr(self.extractor.ocr, 'close'):
                     self.extractor.ocr.close()
+                if hasattr(self.extractor, 'vlm') and self.extractor.vlm is not None \
+                        and hasattr(self.extractor.vlm, 'close'):
+                    self.extractor.vlm.close()
                 self.extractor = None
         except Exception:
             pass
@@ -211,6 +214,8 @@ class PipelineRunner:
         matched_count = 0
         total_llm_calls = 0
         total_ocr_calls = 0
+        total_vlm_calls = 0
+        total_cost = 0.0
         error_summary: str | None = None
         fatal_error = False
         all_articles: list[ArticleMeta] = []
@@ -248,11 +253,13 @@ class PipelineRunner:
             if "parse" in self.stages or "prefilter" in self.stages:
                 candidate_count = self._process_articles(all_articles)
 
-            # ========== 阶段2.5: 提取 (v0.2) ==========
+            # ========== 阶段2.5: 提取 (v0.3 含 VLM) ==========
             if "extract" in self.stages:
                 stats = self._do_extract()
                 total_llm_calls = stats["llm_calls"]
                 total_ocr_calls = stats["ocr_calls"]
+                total_vlm_calls = stats.get("vlm_calls", 0)
+                total_cost = stats.get("cost_estimate", 0.0)
 
             # ========== 阶段2.6: 匹配 (v0.2) ==========
             if "match" in self.stages:
@@ -270,12 +277,15 @@ class PipelineRunner:
             candidate_count=candidate_count,
             llm_count=total_llm_calls,
             ocr_count=total_ocr_calls,
+            vlm_count=total_vlm_calls,
+            cost_estimate=total_cost,
             error_summary=error_summary,
         )
         logger.info(
             f"=== 运行结束 {self.run_id}: fetched={fetched_count}, "
             f"candidates={candidate_count}, matched={matched_count}, "
-            f"llm_calls={total_llm_calls}, ocr_calls={total_ocr_calls} ==="
+            f"llm_calls={total_llm_calls}, ocr_calls={total_ocr_calls}, "
+            f"vlm_calls={total_vlm_calls}, cost={total_cost:.4f}元 ==="
         )
 
     def _do_fetch(self) -> dict:
@@ -496,16 +506,42 @@ class PipelineRunner:
         return candidate_count
 
     def _init_extractor(self):
-        """初始化 Extractor(需要 LLM/OCR Provider)"""
-        from wehire_monitor.providers.factory import create_llm_provider, create_ocr_provider
+        """初始化 Extractor(含 VLM,延迟初始化)"""
+        from wehire_monitor.providers.factory import (
+            create_llm_provider, create_ocr_provider, create_vlm_provider,
+        )
+        from wehire_monitor.modules.extractor.extractor import Extractor
+        from wehire_monitor.modules.extractor.slicer import LongImageSlicer
+        from wehire_monitor.modules.extractor.budget import BudgetManager
+
         llm = create_llm_provider()
         ocr = None
         try:
             ocr = create_ocr_provider()
         except Exception as e:
             logger.warning(f"OCR Provider 初始化失败(将跳过 OCR 路径): {e}")
-        from wehire_monitor.modules.extractor.extractor import Extractor
-        return Extractor(llm_provider=llm, ocr_provider=ocr)
+
+        vlm = None
+        try:
+            vlm = create_vlm_provider()
+            if vlm:
+                logger.info(f"VLM Provider 已初始化: {vlm.name}")
+        except Exception as e:
+            logger.warning(f"VLM Provider 初始化失败(将跳过 VLM 路径): {e}")
+
+        slicer = LongImageSlicer(data_dir=self.data_dir) if vlm else None
+        budget = BudgetManager(
+            daily_budget_cny=self.rules.budget.daily_vlm_budget_cny,
+            max_slices_per_article=self.rules.budget.max_slices_per_article,
+        ) if vlm else None
+
+        return Extractor(
+            llm_provider=llm,
+            ocr_provider=ocr,
+            vlm_provider=vlm,
+            slicer=slicer,
+            budget_manager=budget,
+        )
 
     def _init_matcher(self):
         """初始化 Matcher"""
@@ -513,25 +549,27 @@ class PipelineRunner:
         return Matcher(self.rules.match_rules)
 
     def _do_extract(self) -> dict:
-        """对 CANDIDATE 文章执行 LLM 提取(v0.2)
+        """对 CANDIDATE 文章执行 LLM/VLM 提取(v0.3)
 
-        返回 {"llm_calls": int, "ocr_calls": int}
+        返回 {"llm_calls": int, "ocr_calls": int, "vlm_calls": int, "cost_estimate": float}
         """
         if self.dry_run:
             logger.info("dry-run 模式:跳过提取")
-            return {"llm_calls": 0, "ocr_calls": 0}
+            return {"llm_calls": 0, "ocr_calls": 0, "vlm_calls": 0, "cost_estimate": 0.0}
 
         try:
             self.extractor = self._init_extractor()
         except Exception as e:
             logger.error(f"Extractor 初始化失败: {e}")
-            return {"llm_calls": 0, "ocr_calls": 0}
+            return {"llm_calls": 0, "ocr_calls": 0, "vlm_calls": 0, "cost_estimate": 0.0}
 
         candidates = self.repo.query_by_status(Status.CANDIDATE)
         logger.info(f"提取阶段: {len(candidates)} 篇候选文章")
 
         total_llm = 0
         total_ocr = 0
+        total_vlm = 0
+        total_cost = 0.0
 
         for c in candidates:
             article_id = c["id"]
@@ -555,6 +593,9 @@ class PipelineRunner:
                 extraction = self.extractor.extract(parsed, pf_result)
                 total_llm += extraction.llm_calls
                 total_ocr += extraction.ocr_calls
+                total_vlm += getattr(extraction, 'vlm_calls', 0)
+                # VLM 成本估算: 每次调用约 0.03 元
+                total_cost += getattr(extraction, 'vlm_calls', 0) * 0.03
 
                 # 检查是否需要人工复核
                 needs_review_flag = any(
@@ -625,7 +666,10 @@ class PipelineRunner:
                     except Exception:
                         pass
 
-        return {"llm_calls": total_llm, "ocr_calls": total_ocr}
+        return {
+            "llm_calls": total_llm, "ocr_calls": total_ocr,
+            "vlm_calls": total_vlm, "cost_estimate": total_cost,
+        }
 
     def _do_match(self) -> int:
         """对已提取岗位计算匹配分(v0.2),返回命中岗位数"""
