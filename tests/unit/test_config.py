@@ -69,7 +69,11 @@ def test_cookie_age_check_timezone_consistency(monkeypatch):
 
 
 def test_cookie_age_check_handles_missing(monkeypatch):
-    """无 COOKIE_UPDATED_AT 时不崩溃,返回需告警"""
-    monkeypatch.delenv("COOKIE_UPDATED_AT", raising=False)
+    """无 COOKIE_UPDATED_AT 时不崩溃,返回需告警
+
+    注意: 必须在 ConfigLoader() 构造之后删除 env,因为构造函数会调用
+    load_dotenv() 从 config/.env 重新加载环境变量。
+    """
     loader = ConfigLoader()
+    monkeypatch.delenv("COOKIE_UPDATED_AT", raising=False)
     assert loader.is_cookie_stale() is True
