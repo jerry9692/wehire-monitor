@@ -28,3 +28,21 @@ def create_llm_provider(provider_name: str | None = None):
         return DeepSeekProvider(api_key=api_key, model=model or "deepseek-chat")
 
     raise ValueError(f"不支持的 LLM Provider: {name}")
+
+
+def create_vlm_provider(provider_name: str | None = None):
+    """创建 VLM Provider 实例(可选组件)
+
+    VLM_PROVIDER 未设置或为空时返回 None。
+    """
+    name = provider_name or os.environ.get("VLM_PROVIDER", "").strip()
+    if not name:
+        return None
+    api_key = os.environ.get("VLM_API_KEY", "").strip()
+    model = os.environ.get("VLM_MODEL", "").strip()
+    if not api_key:
+        raise ValueError("VLM_API_KEY 未配置,请在 config/.env 中设置")
+    if name == "qwen_vl":
+        from wehire_monitor.providers.vlm.qwen_vl import QwenVLProvider
+        return QwenVLProvider(api_key=api_key, model=model or "qwen-vl-max")
+    raise ValueError(f"不支持的 VLM Provider: {name}")

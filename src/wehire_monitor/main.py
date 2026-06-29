@@ -40,6 +40,7 @@ def _default(val, default):
 
 @app.command()
 def run(
+    stats: bool = typer.Option(False, "--stats", help="查看最近运行统计"),
     dry_run: bool = typer.Option(False, "--dry-run", help="只读模式,不写库不推送"),
     db: str = typer.Option("data/job_intel.sqlite", help="SQLite 路径(相对路径基于项目根目录)"),
     config_dir: str = typer.Option("config", help="配置目录路径"),
@@ -47,6 +48,39 @@ def run(
 ):
     """执行完整管道:抓取→解析→过滤→入库→推送"""
     from wehire_monitor.pipeline.runner import PipelineRunner
+
+    if stats:
+        logger.info("查看最近运行统计")
+        with PipelineRunner(
+            db_path=db,
+            config_dir=config_dir,
+            data_dir=data_dir,
+            dry_run=True,
+            stages=set(),
+        ) as runner:
+            runs = runner.repo.get_recent_runs(limit=10)
+            if not runs:
+                typer.echo("暂无运行记录")
+                return
+            typer.echo(f"最近 {len(runs)} 条运行记录:")
+            header = (
+                f"{'run_id':<16} {'fetched':>8} {'cand':>6} "
+                f"{'llm':>5} {'ocr':>5} {'vlm':>5} {'cost':>8} error"
+            )
+            typer.echo(header)
+            typer.echo("-" * 80)
+            for r in runs:
+                error = r.get("error_summary") or "-"
+                cost = r.get("cost_estimate") or 0
+                typer.echo(
+                    f"{r['run_id'][:16]:<16} {r.get('fetched_count', 0) or 0:>8} "
+                    f"{r.get('candidate_count', 0) or 0:>6} "
+                    f"{r.get('llm_count', 0) or 0:>5} "
+                    f"{r.get('ocr_count', 0) or 0:>5} "
+                    f"{r.get('vlm_count', 0) or 0:>5} "
+                    f"{cost:>8.2f} {error}"
+                )
+        return
 
     logger.info(f"启动完整管道 (dry_run={dry_run}, db={db})")
     with PipelineRunner(
@@ -205,6 +239,46 @@ def schedule(
         data_dir=data_dir,
     )
     sched.start()
+
+
+@app.command()
+def review(
+    list: bool = typer.Option(False, "--list", help="列出待复核文章"),
+    approve: str = typer.Option(None, "--approve", help="复核通过,推进到 extracted 状态"),
+    reject: str = typer.Option(None, "--reject", help="复核拒绝,归档"),
+):
+    """人工复核队列管理(v0.3)"""
+    from wehire_monitor.pipeline.runner import PipelineRunner
+    from wehire_monitor.domain.status import Status
+
+    if not list and not approve and not reject:
+        typer.echo("用法: wehire review --list | --approve <id> | --reject <id>")
+        raise typer.Exit(code=0)
+
+    with PipelineRunner(
+        dry_run=True,
+        stages=set(),
+    ) as runner:
+        if list:
+            articles = runner.repo.query_by_status(Status.NEED_REVIEW)
+            if not articles:
+                typer.echo("暂无待复核文章")
+                return
+            typer.echo(f"待复核文章 ({len(articles)} 篇):")
+            typer.echo(f"{'ID':<16} {'标题':<30} {'公众号':<15} URL")
+            typer.echo("-" * 80)
+            for a in articles:
+                title = (a.get("title") or "")[:30]
+                account = (a.get("account_name") or "")[:15]
+                typer.echo(
+                    f"{a.get('id', '')[:16]:<16} {title:<30} {account:<15} {a.get('url', '')}"
+                )
+        elif approve:
+            runner.repo.force_status(approve, Status.EXTRACTED)
+            typer.echo(f"已通过复核,文章 {approve[:16]} 推进到 extracted 状态")
+        elif reject:
+            runner.repo.force_status(reject, Status.ARCHIVED)
+            typer.echo(f"已拒绝,文章 {reject[:16]} 归档")
 
 
 if __name__ == "__main__":

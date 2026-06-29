@@ -208,6 +208,18 @@ class Repository:
         row = cursor.fetchone()
         return dict(row) if row else None
 
+    def get_recent_runs(self, limit: int = 10) -> list[dict[str, Any]]:
+        """查询最近 N 条运行日志(按开始时间倒序)"""
+        cursor = self.conn.execute(
+            """SELECT run_id, started_at, ended_at, fetched_count, candidate_count,
+                      ocr_count, llm_count, vlm_count, cost_estimate, error_summary
+               FROM run_logs
+               ORDER BY started_at DESC
+               LIMIT ?""",
+            (limit,),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
     def upsert_jobs(self, article_id: str, jobs: list) -> list[str]:
         """批量写入岗位(jobs 表),自动去重(UNIQUE 约束)。
         在单个事务中完成,返回实际写入/更新的 job_id 列表。

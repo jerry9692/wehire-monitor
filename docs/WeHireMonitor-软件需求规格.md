@@ -9,25 +9,25 @@
 
 ## 0. 项目命名与定位
 
-| 项 | 内容 |
-|---|---|
-| 项目名 | **WeHireMonitor**（中文别名：微岗哨） |
-| 仓库目录 | `wehire-monitor/` |
-| 含义 | We 扣微信生态、Hire 扣招聘、Monitor 扣监控；中文别名"微岗哨"（微/岗/哨）保留为 README 别称 |
-| 定位 | 面向个人低频使用的微信公众号招聘情报监控管道：把"每天刷几十个公众号"变成"每天接收一份精准招聘日报" |
-| 非定位 | 非商业爬虫平台、不追求高并发/账号池/代理池、不自动登录、不绕强风控 |
+| 项    | 内容                                                          |
+| ---- | ----------------------------------------------------------- |
+| 项目名  | **WeHireMonitor**（中文别名：微岗哨）                                 |
+| 仓库目录 | `wehire-monitor/`                                           |
+| 含义   | We 扣微信生态、Hire 扣招聘、Monitor 扣监控；中文别名"微岗哨"（微/岗/哨）保留为 README 别称 |
+| 定位   | 面向个人低频使用的微信公众号招聘情报监控管道：把"每天刷几十个公众号"变成"每天接收一份精准招聘日报"         |
+| 非定位  | 非商业爬虫平台、不追求高并发/账号池/代理池、不自动登录、不绕强风控                          |
 
 ---
 
 ## 1. 关键设计决策（已锁定）
 
-| 决策项 | 选定方案 | 落地影响 |
-|---|---|---|
-| 整体架构 | 方案 C：分层单体 + 插件式抽象 | 单 Python 包部署，内部分层严格、模块边界清晰，状态机驱动、可断点续跑 |
-| LLM/VLM 供应商 | 可配置多供应商 | 抽象 `LLMProvider`/`VLMProvider` 接口，`.env` 切换，默认 DeepSeek（文本）+ Qwen-VL（视觉） |
-| 开源依赖 | 混合策略 | 解析层封装 `wechat-article-for-ai`；抓取层参考 `wechat_articles_spider` 思路自研 |
-| 部署形态 | 本地脚本为主，可选容器化 | v0.1–v0.3 纯本地 cron/APScheduler；v1.0 补 Dockerfile |
-| 细化范围 | 全量到 v1.0 | 本文覆盖 v0.1→v0.2→v0.3→v1.0 全部阶段 |
+| 决策项         | 选定方案              | 落地影响                                                                     |
+| ----------- | ----------------- | ------------------------------------------------------------------------ |
+| 整体架构        | 方案 C：分层单体 + 插件式抽象 | 单 Python 包部署，内部分层严格、模块边界清晰，状态机驱动、可断点续跑                                   |
+| LLM/VLM 供应商 | 可配置多供应商           | 抽象 `LLMProvider`/`VLMProvider` 接口，`.env` 切换，默认 DeepSeek（文本）+ Qwen-VL（视觉） |
+| 开源依赖        | 混合策略              | 解析层封装 `wechat-article-for-ai`；抓取层参考 `wechat_articles_spider` 思路自研        |
+| 部署形态        | 本地脚本为主，可选容器化      | v0.1–v0.3 纯本地 cron/APScheduler；v1.0 补 Dockerfile                         |
+| 细化范围        | 全量到 v1.0          | 本文覆盖 v0.1→v0.2→v0.3→v1.0 全部阶段                                            |
 
 ---
 
@@ -41,31 +41,31 @@
 
 ### 2.2 核心依赖
 
-| 领域 | 组件 | 版本建议 | 用途 |
-|---|---|---|---|
-| HTTP | `httpx` | ^0.27 | 抓取、Webhook、LLM API 调用（同步即可，低频） |
-| HTML 解析 | `beautifulsoup4` + `lxml` | ^4.12 / ^5 | 正文抽取自研兜底 |
-| 浏览器渲染兜底 | `playwright` | ^1.44 | HTML 解析失败时渲染（仅按需启用） |
-| Markdown 转换 | 封装 `wechat-article-for-ai`，兜底 `markdownify` | - | URL→Markdown + 图片本地化 |
-| 图片处理 | `Pillow` | ^10 | 切片、缩放、格式归一 |
-| 感知哈希 | `imagehash` | ^4 | 图片去重 |
-| OCR（默认） | `rapidocr-onnxruntime` | ^1.3 | CPU 本地 OCR，轻量 |
-| OCR（备选） | `paddleocr` | ^2.7 | 高精度备选，依赖较重 |
-| 数据校验 | `pydantic` | ^2 | 配置校验、LLM JSON 输出校验、领域模型 |
-| 存储 | `sqlite3`（标准库） | - | 单文件数据库，纯驱动 + dataclass 映射 |
-| 调度 | `apscheduler` | ^3.10 | 跨平台定时（Windows 友好） |
-| 配置 | `pyyaml` + `python-dotenv` | ^6 / ^1 | YAML 规则 + .env 密钥 |
-| CLI | `typer` | ^0.12 | 控制台命令 `wehire-monitor`，子命令 `fetch/parse/prefilter/extract/notify/run` |
-| 日志 | `loguru` | ^0.7 | 结构化日志、文件轮转 |
-| 测试 | `pytest` + `pytest-mock` | ^8 | 单元 + 集成测试 |
+| 领域          | 组件                                          | 版本建议       | 用途                                                                    |
+| ----------- | ------------------------------------------- | ---------- | --------------------------------------------------------------------- |
+| HTTP        | `httpx`                                     | ^0.27      | 抓取、Webhook、LLM API 调用（同步即可，低频）                                        |
+| HTML 解析     | `beautifulsoup4` + `lxml`                   | ^4.12 / ^5 | 正文抽取自研兜底                                                              |
+| 浏览器渲染兜底     | `playwright`                                | ^1.44      | HTML 解析失败时渲染（仅按需启用）                                                   |
+| Markdown 转换 | 封装 `wechat-article-for-ai`，兜底 `markdownify` | -          | URL→Markdown + 图片本地化                                                  |
+| 图片处理        | `Pillow`                                    | ^10        | 切片、缩放、格式归一                                                            |
+| 感知哈希        | `imagehash`                                 | ^4         | 图片去重                                                                  |
+| OCR（默认）     | `rapidocr-onnxruntime`                      | ^1.3       | CPU 本地 OCR，轻量                                                         |
+| OCR（备选）     | `paddleocr`                                 | ^2.7       | 高精度备选，依赖较重                                                            |
+| 数据校验        | `pydantic`                                  | ^2         | 配置校验、LLM JSON 输出校验、领域模型                                               |
+| 存储          | `sqlite3`（标准库）                              | -          | 单文件数据库，纯驱动 + dataclass 映射                                             |
+| 调度          | `apscheduler`                               | ^3.10      | 跨平台定时（Windows 友好）                                                     |
+| 配置          | `pyyaml` + `python-dotenv`                  | ^6 / ^1    | YAML 规则 + .env 密钥                                                     |
+| CLI         | `typer`                                     | ^0.12      | 控制台命令 `wehire-monitor`，子命令 `fetch/parse/prefilter/extract/notify/run` |
+| 日志          | `loguru`                                    | ^0.7       | 结构化日志、文件轮转                                                            |
+| 测试          | `pytest` + `pytest-mock`                    | ^8         | 单元 + 集成测试                                                             |
 
 ### 2.3 LLM/VLM 供应商（默认实现）
 
-| 角色 | 默认 Provider | 备选 | 切换方式 |
-|---|---|---|---|
+| 角色     | 默认 Provider               | 备选                                     | 切换方式            |
+| ------ | ------------------------- | -------------------------------------- | --------------- |
 | 文本 LLM | DeepSeek（`deepseek-chat`） | Qwen-Plus / GPT-4o-mini / Claude Haiku | `LLM_PROVIDER=` |
-| 视觉 VLM | Qwen-VL（`qwen-vl-max`） | GPT-4o / Claude Sonnet | `VLM_PROVIDER=` |
-| OCR | RapidOCR（本地） | PaddleOCR | `OCR_PROVIDER=` |
+| 视觉 VLM | Qwen-VL（`qwen-vl-max`）    | GPT-4o / Claude Sonnet                 | `VLM_PROVIDER=` |
+| OCR    | RapidOCR（本地）              | PaddleOCR                              | `OCR_PROVIDER=` |
 
 所有 Provider 经统一抽象接口，Prompt 与 Provider 解耦（见 §7）。
 
@@ -172,6 +172,7 @@ need_cookie, need_captcha, need_review
 **职责**：基于手动维护的 Cookie/Token，调用微信公众平台后台接口，发现目标公众号近 24–36 小时新文章，输出文章元信息队列。
 
 **接口签名**：
+
 ```python
 class Fetcher:
     def check_cookie(self) -> CookieStatus  # 检测有效性+更新时间
@@ -183,6 +184,7 @@ class Fetcher:
 **输入契约**：`accounts.yaml` 条目 + `.env` 中 `WECHAT_MP_COOKIE/TOKEN/USER_AGENT`。
 
 **输出契约**：
+
 ```python
 @dataclass
 class ArticleMeta:
@@ -195,15 +197,16 @@ class ArticleMeta:
 
 **异常处理**（承接 PRD §8.1）：
 
-| 异常 | 判断 | 处理 | 状态 |
-|---|---|---|---|
-| Cookie 失效 | 登录页/401/token 无效 | 停止抓取，推送提醒 | `need_cookie` |
-| 验证码 | 响应含验证码提示 | 当前任务暂停 6–12h，不重试 | `need_captcha` |
-| 搜索不到 | name 失败→alias | 仍失败记录 `account_not_found` | 跳过 |
-| 限流 | 403/429/空响应 | 指数退避，单号跳过 | 重试后跳过 |
-| URL 重复 | URL hash 命中 | 不再解析 | `archived` |
+| 异常        | 判断               | 处理                        | 状态             |
+| --------- | ---------------- | ------------------------- | -------------- |
+| Cookie 失效 | 登录页/401/token 无效 | 停止抓取，推送提醒                 | `need_cookie`  |
+| 验证码       | 响应含验证码提示         | 当前任务暂停 6–12h，不重试          | `need_captcha` |
+| 搜索不到      | name 失败→alias    | 仍失败记录 `account_not_found` | 跳过             |
+| 限流        | 403/429/空响应      | 指数退避，单号跳过                 | 重试后跳过          |
+| URL 重复    | URL hash 命中      | 不再解析                      | `archived`     |
 
 **限频策略**（写入 `infra/rate_limiter.py`）：
+
 - 公众号搜索间隔：随机 20–60s
 - 文章抓取间隔：随机 5–20s
 - 单次任务最大文章数：80；单号单次最多 10
@@ -217,12 +220,14 @@ class ArticleMeta:
 **职责**：下载文章 HTML，抽取标题/作者/发布时间/正文文本/图片真实地址，下载图片到本地。
 
 **接口签名**：
+
 ```python
 class Parser:
     def parse(self, meta: ArticleMeta) -> ParsedArticle
 ```
 
 **解析规则**（承接 PRD §8.2）：
+
 - 正文容器优先 `#js_content`
 - 图片地址优先级：`data-src` > `src` > `data-backsrc`
 - 保留图片顺序、宽高、sha256
@@ -231,6 +236,7 @@ class Parser:
 - HTML 解析失败 → 浏览器渲染兜底（playwright，按需启用）
 
 **输出契约**：
+
 ```python
 @dataclass
 class ImageAsset:
@@ -258,22 +264,26 @@ class ParsedArticle:
 **职责**：基于标题/摘要/正文前 1000 字/图片 OCR 抽样，计算招聘分，门控是否进入 AI 提取。
 
 **接口签名**：
+
 ```python
 class Prefilter:
     def score(self, article: ParsedArticle) -> PrefilterResult
 ```
 
 **评分公式**（承接 PRD §8.2）：
+
 ```
 招聘分 = 标题命中*40 + 正文命中*30 + 投递词命中*20 + 邮箱/报名链接命中*10 - 排除词惩罚
 ```
 
 **门控**：
+
 - `score >= 50` → `candidate`，直接进入提取
 - `30 <= score < 50` → `candidate`，先 OCR 抽样复核
 - `score < 30` → `ignored`
 
 **输出契约**：
+
 ```python
 @dataclass
 class PrefilterResult:
@@ -289,12 +299,14 @@ class PrefilterResult:
 **职责**：对候选招聘文章，按双路/三路切换逻辑，调用 OCR/文本LLM/VLM 提取结构化岗位，校验归一化。
 
 **接口签名**：
+
 ```python
 class Extractor:
     def extract(self, article: ParsedArticle, prefilter: PrefilterResult) -> ExtractionResult
 ```
 
 **双路切换逻辑**（承接 PRD §8.3.1）：
+
 ```
 正文>=500字 且含岗位/投递信息 → 文本 LLM
 否则 有图片 → OCR → 质量评分(ocr_quality_score)
@@ -304,6 +316,7 @@ class Extractor:
 ```
 
 **OCR 质量评分**（承接 PRD §8.3.1）：
+
 ```
 ocr_quality_score =
   0.35*平均识别置信度
@@ -314,6 +327,7 @@ ocr_quality_score =
 ```
 
 **长图切片策略**（承接 PRD §8.3.2）：
+
 - 最大切片高度 1800px（区间 1600–2200）
 - 重叠 220px（区间 180–250）
 - 原宽 >1440px 等比缩放到 1440px
@@ -322,6 +336,7 @@ ocr_quality_score =
 - 每篇最多 8 切片，超过先 OCR 找关键区域
 
 **切片去重合并**：
+
 ```
 岗位唯一键 = normalize(company) + normalize(job_name) + normalize(location)
 相邻切片重复 → 保留字段更完整者
@@ -331,6 +346,7 @@ ocr_quality_score =
 **Prompt**：文本 LLM Prompt 与 VLM Prompt 模板见 PRD §8.3.3/§8.3.4，本项目将其外置为 `providers/prompts/*.txt`，与 Provider 解耦。
 
 **输出契约**：
+
 ```python
 @dataclass
 class Job:
@@ -355,6 +371,7 @@ class ExtractionResult:
 ```
 
 **后处理校验**：
+
 - 邮箱正则：`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`
 - `email` 与 `email_chars.join("")` 不一致 → 标记 `email_mismatch` → `need_review`
 - 截止日期早于发布时间 → 标记异常
@@ -366,6 +383,7 @@ class ExtractionResult:
 **职责**：基于 `rules.yaml`，对提取出的岗位计算 `match_score`，决定是否推送。
 
 **接口签名**：
+
 ```python
 class Matcher:
     def match(self, jobs: list[Job]) -> list[MatchedJob]
@@ -378,12 +396,14 @@ class Matcher:
 **职责**：组装日报，按 Webhook 推送，控制推送量与复核区。
 
 **接口签名**：
+
 ```python
 class Notifier:
     def send_daily(self, report: DailyReport) -> NotifyResult
 ```
 
 **推送规则**（承接 PRD §8.4）：
+
 - `match_score >= notify_min_score` 才推送
 - `confidence < 60` 进"需复核"区
 - 每次最多推送 20 条
@@ -397,6 +417,7 @@ class Notifier:
 **职责**：领域对象持久化、去重查询、状态迁移、运行日志。
 
 **接口签名**：
+
 ```python
 class Repository:
     def upsert_article(self, a: Article) -> None
@@ -408,6 +429,7 @@ class Repository:
 ```
 
 **去重策略**（承接 PRD §8.4）：
+
 1. URL hash
 2. 正文 hash
 3. 图片 perceptual hash
@@ -594,6 +616,7 @@ class OCRProvider(Protocol):
 ### 7.2 工厂与切换
 
 `providers/factory.py` 读取 `.env`，返回对应实现：
+
 - `LLM_PROVIDER=deepseek` → `providers/llm/deepseek.py`
 - `VLM_PROVIDER=qwen_vl` → `providers/vlm/qwen_vl.py`
 - `OCR_PROVIDER=rapid` → `providers/ocr/rapid.py`
@@ -697,6 +720,7 @@ class OCRProvider(Protocol):
     - `.env.example`、`accounts.yaml.example`、`rules.yaml.example`
 
 **阶段验收**：
+
 - 能对 ≥3 个真实公众号完成抓取→过滤→入库→推送标题链接
 - Cookie 失效能 100% 推送提醒
 - 单次任务 ≤45 分钟（20–30 个号）
@@ -755,6 +779,7 @@ class OCRProvider(Protocol):
     - Provider 工厂切换测试
 
 **阶段验收**：
+
 - 邮箱提取准确率 ≥98%（不确定进复核）
 - 公司/岗位/地点整体可用率 ≥90%
 - 非招聘文章过滤准确率 ≥85%
@@ -802,6 +827,7 @@ class OCRProvider(Protocol):
    - 端到端长图文章处理测试
 
 **阶段验收**：
+
 - VLM 调用占比 ≤20%（候选招聘文章）
 - 长图招聘信息可结构化提取，岗位行列不错配
 - 邮箱逐字符识别，不确定标记 `?` 进复核
@@ -848,6 +874,7 @@ class OCRProvider(Protocol):
    - 排障手册（Cookie/验证码/限流/预算）
 
 **阶段验收**：
+
 - 连续 7 天稳定运行无需人工干预（除 Cookie 更新）
 - 看板可查看 7 天趋势
 - 失败任务可一键重跑
@@ -860,43 +887,43 @@ class OCRProvider(Protocol):
 
 ## 10. 非功能性需求（落地）
 
-| 维度 | 要求 | 落地 |
-|---|---|---|
-| 成本 | VLM≤20%、每日预算上限、OCR 本地、文本 LLM 低价 | 三层门控 + `budget` 配置 |
-| 稳定 | 单篇失败不影响整批、可重跑、状态机推进 | 状态机 + `run_id` + 原始留档 |
-| 风控 | 低频、不绕验证码、不账号池、遇风控降频 | 限频器 + 异常处理表 |
-| 安全 | Cookie/Key 入 `.env`、不入日志、邮箱可脱敏 | `python-dotenv` + loguru 过滤 |
-| 可维护 | YAML 规则、每模块 CLI、dry-run、周报 | Typer 子命令 + YAML 配置 |
+| 维度  | 要求                              | 落地                          |
+| --- | ------------------------------- | --------------------------- |
+| 成本  | VLM≤20%、每日预算上限、OCR 本地、文本 LLM 低价 | 三层门控 + `budget` 配置          |
+| 稳定  | 单篇失败不影响整批、可重跑、状态机推进             | 状态机 + `run_id` + 原始留档       |
+| 风控  | 低频、不绕验证码、不账号池、遇风控降频             | 限频器 + 异常处理表                 |
+| 安全  | Cookie/Key 入 `.env`、不入日志、邮箱可脱敏  | `python-dotenv` + loguru 过滤 |
+| 可维护 | YAML 规则、每模块 CLI、dry-run、周报      | Typer 子命令 + YAML 配置         |
 
 ---
 
 ## 11. 验收指标（承接 PRD §12）
 
-| 指标 | 目标 |
-|---|---|
-| 非招聘文章过滤准确率 | ≥85% |
-| 招聘文章漏检率 | ≤10% |
-| 邮箱提取准确率 | ≥98%，不确定进复核 |
-| 公司/岗位/地点整体可用率 | ≥90% |
-| 单次任务耗时（20–30 号） | ≤45 分钟 |
-| VLM 调用占比（候选文章） | ≤20% |
-| 重复推送率 | ≤1% |
-| Cookie 失效可感知 | 100% 推送提醒 |
+| 指标              | 目标          |
+| --------------- | ----------- |
+| 非招聘文章过滤准确率      | ≥85%        |
+| 招聘文章漏检率         | ≤10%        |
+| 邮箱提取准确率         | ≥98%，不确定进复核 |
+| 公司/岗位/地点整体可用率   | ≥90%        |
+| 单次任务耗时（20–30 号） | ≤45 分钟      |
+| VLM 调用占比（候选文章）  | ≤20%        |
+| 重复推送率           | ≤1%         |
+| Cookie 失效可感知    | 100% 推送提醒   |
 
 ---
 
 ## 12. 风险与对策（承接 PRD §14）
 
-| 风险 | 影响 | 对策 |
-|---|---|---|
-| 微信后台接口变动 | URL 发现失效 | 保留手动 URL 导入、第三方聚合号解析降级 |
-| Cookie 频繁失效 | 任务中断 | 每日运行前检测并提醒 |
-| 验证码 | 无法继续抓取 | 暂停任务，不强行重试 |
-| 长图 OCR 错位 | 岗位字段错配 | OCR 质量评分 + VLM 切片 + 证据字段 |
-| VLM 成本不可控 | 花费上升 | 每日预算、切片上限、候选阈值 |
-| 邮箱识别错误 | 投递失败 | 逐字符输出 + 正则 + 不确定复核 |
-| 误推校招/实习 | 干扰用户 | 强排除词 + `article_type` 分类 |
-| 开源依赖上游变动 | 解析层失效 | 适配器 + 自研 BS4 兜底 |
+| 风险          | 影响       | 对策                       |
+| ----------- | -------- | ------------------------ |
+| 微信后台接口变动    | URL 发现失效 | 保留手动 URL 导入、第三方聚合号解析降级   |
+| Cookie 频繁失效 | 任务中断     | 每日运行前检测并提醒               |
+| 验证码         | 无法继续抓取   | 暂停任务，不强行重试               |
+| 长图 OCR 错位   | 岗位字段错配   | OCR 质量评分 + VLM 切片 + 证据字段 |
+| VLM 成本不可控   | 花费上升     | 每日预算、切片上限、候选阈值           |
+| 邮箱识别错误      | 投递失败     | 逐字符输出 + 正则 + 不确定复核       |
+| 误推校招/实习     | 干扰用户     | 强排除词 + `article_type` 分类 |
+| 开源依赖上游变动    | 解析层失效    | 适配器 + 自研 BS4 兜底          |
 
 ---
 

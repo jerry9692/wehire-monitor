@@ -141,3 +141,24 @@ class OCRResult:
     """OCR 完整结果"""
     lines: list[OCRLine]
     full_text: str
+
+
+# ========== v0.3 领域模型 ==========
+
+
+@dataclass
+class SliceMeta:
+    """切片元信息(PRD §8.3.2)"""
+    image_index: int          # 原图索引(第几张图)
+    slice_index: int          # 切片索引(该图的第几个切片)
+    y_start: int              # 切片在原图中的 y 起始坐标
+    y_end: int                # 切片在原图中的 y 结束坐标
+    is_bottom: bool = False   # 是否为底部切片(含邮箱/二维码/报名方式)
+
+
+@dataclass
+class ImageSlice:
+    """图片切片"""
+    pil_image: object | None       # PIL.Image 对象(内存中,可 None 用于测试)
+    local_path: str                # 切片保存的本地路径
+    meta: SliceMeta
