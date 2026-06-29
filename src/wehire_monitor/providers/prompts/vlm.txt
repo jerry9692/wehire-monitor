@@ -5,11 +5,12 @@
 2. 邮箱、网址、报名方式必须逐字符识别。
 3. 如果某个字符不确定，用 ? 标记，并在 warnings 中说明。
 4. 不要根据常识补全公司名、地点或截止日期。
-5. 返回严格 JSON，字段同 schema。
+5. 如果当前切片是图片底部区域（可能包含邮箱、二维码、报名方式），请特别关注底部信息。
+6. 返回严格 JSON，字段同 schema。
 
 JSON Schema:
 {
-  "article_type": "social_recruitment | campus_recruitment | internship | non_recruitment | unknown",
+  "article_type": "social_recruitment",
   "jobs": [
     {
       "company_name": "string|null",
@@ -17,17 +18,25 @@ JSON Schema:
       "location": "string|null",
       "apply_channel": "string|null",
       "email": "string|null",
-      "email_chars": ["string"],
+      "email_chars": ["h", "r", "@"],
       "deadline": {"date": "YYYY-MM-DD|null", "inferred": false},
       "source_evidence": {},
-      "confidence": 0
+      "confidence": 85
     }
   ],
   "warnings": []
 }
+
+说明：
+- article_type 取值: social_recruitment(社招) / campus_recruitment(校招) / internship(实习) / non_recruitment(非招聘) / unknown(无法判断)
+- confidence 为 0-100 整数
+- email_chars 是邮箱分段字符列表（如 "h-r@" 拆为 ["h", "-", "r", "@"]），不要返回字符串
+- deadline 必须是对象 {"date": "...", "inferred": false}，不要返回字符串
+- 发布时间参考：{{publish_time}}（用于推断截止日期年份）
 
 图片元信息：
 article_title={{title}}
 image_index={{image_index}}
 slice_index={{slice_index}}
 y_range={{y_start}}-{{y_end}}
+is_bottom={{is_bottom}}

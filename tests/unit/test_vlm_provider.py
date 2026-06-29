@@ -183,7 +183,8 @@ def test_qwen_vl_prompt_render():
     """QwenVLProvider prompt 渲染 — 占位符全部替换"""
     provider = QwenVLProvider(api_key="sk-test", model="qwen-vl-max")
     rendered = provider._render_prompt(
-        title="测试标题", image_index=1, slice_index=2, y_start=100, y_end=500
+        title="测试标题", image_index=1, slice_index=2, y_start=100, y_end=500,
+        is_bottom=False, publish_time="2026-06-28",
     )
     assert "测试标题" in rendered
     assert "{{title}}" not in rendered
@@ -191,6 +192,8 @@ def test_qwen_vl_prompt_render():
     assert "{{slice_index}}" not in rendered
     assert "{{y_start}}" not in rendered
     assert "{{y_end}}" not in rendered
+    assert "{{is_bottom}}" not in rendered
+    assert "{{publish_time}}" not in rendered
     # 验证具体值已注入
     assert "image_index=1" in rendered
     assert "slice_index=2" in rendered

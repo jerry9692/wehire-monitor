@@ -1,7 +1,7 @@
 """领域模型"""
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 
 @dataclass
@@ -115,6 +115,7 @@ class ExtractionResult:
     llm_calls: int = 0
     vlm_calls: int = 0
     ocr_calls: int = 0
+    cost_estimate: float = 0.0   # v0.3: VLM 成本估算(元)
 
 
 @dataclass
@@ -159,6 +160,6 @@ class SliceMeta:
 @dataclass
 class ImageSlice:
     """图片切片"""
-    pil_image: object | None       # PIL.Image 对象(内存中,可 None 用于测试)
-    local_path: str                # 切片保存的本地路径
+    pil_image: Any | None            # PIL.Image 对象(内存中,可 None 用于测试)
+    local_path: str                  # 切片保存的本地路径
     meta: SliceMeta

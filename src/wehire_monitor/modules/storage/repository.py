@@ -159,7 +159,11 @@ class Repository:
         return [dict(row) for row in cursor.fetchall()]
 
     def query_pending_articles(self) -> list[dict[str, Any]]:
-        """查询所有处于中间状态或错误状态的文章(支持断点续跑和重试)"""
+        """查询所有处于待处理状态的文章(支持断点续跑和重试)
+
+        注意:不包含 EXTRACTED/MATCHED/NOTIFIED/ARCHIVED 等终态或已完成提取的状态,
+        避免 parse 等命令将已提取的文章错误降级重处理。
+        """
         pending_statuses = (
             Status.DISCOVERED.value,
             Status.FETCHED.value,
@@ -168,8 +172,8 @@ class Repository:
             Status.ERROR_PARSE.value,
             Status.ERROR_OCR.value,
             Status.ERROR_LLM.value,
-            Status.EXTRACTED.value,
-            Status.OCR_DONE.value,
+            # CANDIDATE 也应包含(已预过滤待提取)
+            Status.CANDIDATE.value,
         )
         placeholders = ",".join("?" * len(pending_statuses))
         cursor = self.conn.execute(

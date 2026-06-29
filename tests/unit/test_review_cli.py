@@ -81,15 +81,15 @@ def test_review_list_with_items(mock_cls):
 
 @patch("wehire_monitor.pipeline.runner.PipelineRunner")
 def test_review_approve(mock_cls):
-    """复核通过: force_status(id, EXTRACTED)"""
+    """复核通过: force_status(id, CANDIDATE) 以便重新提取"""
     mock_runner = _make_mock_runner()
     mock_cls.return_value.__enter__.return_value = mock_runner
 
     result = cli.invoke(app, ["review", "--approve", "abc123def456"])
 
     assert result.exit_code == 0
-    mock_runner.repo.force_status.assert_called_once_with("abc123def456", Status.EXTRACTED)
-    assert "extracted" in result.output or "通过" in result.output
+    mock_runner.repo.force_status.assert_called_once_with("abc123def456", Status.CANDIDATE)
+    assert "candidate" in result.output or "通过" in result.output or "CANDIDATE" in result.output
 
 
 @patch("wehire_monitor.pipeline.runner.PipelineRunner")

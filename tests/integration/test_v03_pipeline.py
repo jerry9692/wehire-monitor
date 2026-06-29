@@ -42,6 +42,7 @@ def test_v03_vlm_count_tracked_in_run_logs(tmp_db_path, sample_accounts_yaml, sa
             source_evidence={}, confidence=85,
         )],
         warnings=[], ocr_calls=1, vlm_calls=2,
+        cost_estimate=0.06,  # 2 slices * 0.03 = 0.06
     )
 
     with patch.object(runner.parser, "parse", return_value=parsed), \
@@ -139,6 +140,7 @@ def test_v03_full_pipeline_with_vlm_and_notify(tmp_db_path, sample_accounts_yaml
             source_evidence={}, confidence=90,
         )],
         warnings=[], ocr_calls=1, vlm_calls=2,
+        cost_estimate=0.06,
     )
 
     matched_result = [MatchedJob(

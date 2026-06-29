@@ -244,7 +244,7 @@ def schedule(
 @app.command()
 def review(
     list: bool = typer.Option(False, "--list", help="列出待复核文章"),
-    approve: str = typer.Option(None, "--approve", help="复核通过,推进到 extracted 状态"),
+    approve: str = typer.Option(None, "--approve", help="复核通过,重新提取(迁回 CANDIDATE 触发重新处理)"),
     reject: str = typer.Option(None, "--reject", help="复核拒绝,归档"),
 ):
     """人工复核队列管理(v0.3)"""
@@ -274,8 +274,9 @@ def review(
                     f"{a.get('id', '')[:16]:<16} {title:<30} {account:<15} {a.get('url', '')}"
                 )
         elif approve:
-            runner.repo.force_status(approve, Status.EXTRACTED)
-            typer.echo(f"已通过复核,文章 {approve[:16]} 推进到 extracted 状态")
+            # approve 后迁回 CANDIDATE,下次 run 时重新提取(而非直接到 EXTRACTED 导致无 jobs 被归档)
+            runner.repo.force_status(approve, Status.CANDIDATE)
+            typer.echo(f"已通过复核,文章 {approve[:16]} 迁回 CANDIDATE 状态,下次 run 将重新提取")
         elif reject:
             runner.repo.force_status(reject, Status.ARCHIVED)
             typer.echo(f"已拒绝,文章 {reject[:16]} 归档")

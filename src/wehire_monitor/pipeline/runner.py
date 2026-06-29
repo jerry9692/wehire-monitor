@@ -180,6 +180,10 @@ class PipelineRunner:
         except Exception:
             pass
         try:
+            self.matcher = None
+        except Exception:
+            pass
+        try:
             self.parser.close()
         except Exception:
             pass
@@ -506,12 +510,13 @@ class PipelineRunner:
         return candidate_count
 
     def _init_extractor(self):
-        """初始化 Extractor(含 VLM,延迟初始化)"""
+        """初始化 Extractor(含 VLM/Stitcher/Slicer/Budget,延迟初始化)"""
         from wehire_monitor.providers.factory import (
             create_llm_provider, create_ocr_provider, create_vlm_provider,
         )
         from wehire_monitor.modules.extractor.extractor import Extractor
         from wehire_monitor.modules.extractor.slicer import LongImageSlicer
+        from wehire_monitor.modules.extractor.stitcher import ImageStitcher
         from wehire_monitor.modules.extractor.budget import BudgetManager
 
         llm = create_llm_provider()
@@ -529,6 +534,8 @@ class PipelineRunner:
         except Exception as e:
             logger.warning(f"VLM Provider 初始化失败(将跳过 VLM 路径): {e}")
 
+        # Stitcher 始终初始化(短图拼接是图片预处理步骤,不依赖 VLM)
+        stitcher = ImageStitcher(data_dir=self.data_dir)
         slicer = LongImageSlicer(data_dir=self.data_dir) if vlm else None
         budget = BudgetManager(
             daily_budget_cny=self.rules.budget.daily_vlm_budget_cny,
@@ -540,6 +547,7 @@ class PipelineRunner:
             ocr_provider=ocr,
             vlm_provider=vlm,
             slicer=slicer,
+            stitcher=stitcher,
             budget_manager=budget,
         )
 
@@ -594,8 +602,8 @@ class PipelineRunner:
                 total_llm += extraction.llm_calls
                 total_ocr += extraction.ocr_calls
                 total_vlm += getattr(extraction, 'vlm_calls', 0)
-                # VLM 成本估算: 每次调用约 0.03 元
-                total_cost += getattr(extraction, 'vlm_calls', 0) * 0.03
+                # 使用 ExtractionResult 中的准确成本(而非硬编码估算)
+                total_cost += getattr(extraction, 'cost_estimate', 0.0)
 
                 # 检查是否需要人工复核
                 needs_review_flag = any(

@@ -175,9 +175,9 @@ def test_slice_metadata(tmp_path):
         assert s.local_path != ""
         assert Path(s.local_path).exists()
 
-    # pil_image 不为 None
+    # pil_image 为 None(v0.3 优化:不保留内存中的 PIL 对象以节省内存)
     for s in slices:
-        assert s.pil_image is not None
+        assert s.pil_image is None
 
 
 # ----------------------------------------------------------------------

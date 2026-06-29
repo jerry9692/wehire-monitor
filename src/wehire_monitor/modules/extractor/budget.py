@@ -46,10 +46,17 @@ class BudgetManager:
         """判断剩余预算是否足够支付"""
         return self.remaining >= cost
 
-    def consume(self, cost: float, slices: int = 1) -> None:
-        """消费预算"""
+    def consume(self, cost: float, slices: int = 1, api_calls: int | None = None) -> None:
+        """消费预算
+        
+        Args:
+            cost: 本次消费金额(元)
+            slices: 本次处理的切片数
+            api_calls: 本次 API 调用次数(默认等于 1,即一次 consume 对应一次 API 调用;
+                       若一次调用处理多个切片需显式传入)
+        """
         self._spent += cost
-        self._vlm_calls += 1
+        self._vlm_calls += (api_calls if api_calls is not None else 1)
         self._total_slices += slices
         logger.info(
             f"VLM 预算消费: {cost:.4f} 元 ({slices} 切片), "

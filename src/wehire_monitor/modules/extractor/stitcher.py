@@ -203,71 +203,88 @@ class ImageStitcher:
         """拼接给定的图片(已选定),并打上原始索引标签。"""
         pil_images = [self._load_image(asset) for asset in selected]
         pil_images = [img for img in pil_images if img is not None]
+        created_images: list[Image.Image] = list(pil_images)  # 跟踪所有需关闭的图像
 
-        if not pil_images:
-            logger.warning("无可拼接图片,返回空结果")
-            return StitchedImages(
-                local_path="",
-                source_indices=source_indices,
-                width=0,
-                height=0,
-                is_stitched=False,
-                overlap_trimmed=0,
+        try:
+            if not pil_images:
+                logger.warning("无可拼接图片,返回空结果")
+                return StitchedImages(
+                    local_path="",
+                    source_indices=source_indices,
+                    width=0,
+                    height=0,
+                    is_stitched=False,
+                    overlap_trimmed=0,
+                )
+
+            # 单图: 直接保存,不拼接
+            if len(pil_images) == 1:
+                img = pil_images[0]
+                out_path = self._save(img, source_indices)
+                return StitchedImages(
+                    local_path=out_path,
+                    source_indices=source_indices,
+                    width=img.width,
+                    height=img.height,
+                    is_stitched=False,
+                    overlap_trimmed=0,
+                )
+
+            # 多图: 以最窄图为基准,其他图等比缩放
+            min_width = min(img.width for img in pil_images)
+            scaled = []
+            for img in pil_images:
+                s = self._scale_to_width(img, min_width)
+                if s is not img:
+                    created_images.append(s)
+                scaled.append(s)
+
+            # 竖直拼接 + 重叠检测
+            canvas = scaled[0]
+            overlap_trimmed = 0
+            for i in range(1, len(scaled)):
+                next_img = scaled[i]
+                if self.overlap_detect:
+                    ov = self._detect_overlap(canvas, next_img)
+                else:
+                    ov = 0
+                # 防止裁剪超过图片高度
+                ov = min(ov, max(next_img.height - 1, 0))
+                overlap_trimmed += ov
+                if ov > 0:
+                    next_img = next_img.crop(
+                        (0, ov, next_img.width, next_img.height)
+                    )
+                    created_images.append(next_img)
+                    logger.info(f"第 {i} 张图裁剪顶部重叠 {ov}px")
+                new_h = canvas.height + next_img.height
+                new_canvas = Image.new("RGB", (min_width, new_h), "white")
+                new_canvas.paste(canvas, (0, 0))
+                new_canvas.paste(next_img, (0, canvas.height))
+                if canvas is not scaled[0]:
+                    created_images.append(new_canvas)
+                canvas = new_canvas
+
+            out_path = self._save(canvas, source_indices)
+            logger.info(
+                f"拼接 {len(scaled)} 张图 → {canvas.width}x{canvas.height}, "
+                f"裁剪重叠 {overlap_trimmed}px"
             )
-
-        # 单图: 直接保存,不拼接
-        if len(pil_images) == 1:
-            img = pil_images[0]
-            out_path = self._save(img, source_indices)
             return StitchedImages(
                 local_path=out_path,
                 source_indices=source_indices,
-                width=img.width,
-                height=img.height,
-                is_stitched=False,
-                overlap_trimmed=0,
+                width=canvas.width,
+                height=canvas.height,
+                is_stitched=True,
+                overlap_trimmed=overlap_trimmed,
             )
-
-        # 多图: 以最窄图为基准,其他图等比缩放
-        min_width = min(img.width for img in pil_images)
-        scaled = [self._scale_to_width(img, min_width) for img in pil_images]
-
-        # 竖直拼接 + 重叠检测
-        canvas = scaled[0]
-        overlap_trimmed = 0
-        for i in range(1, len(scaled)):
-            next_img = scaled[i]
-            if self.overlap_detect:
-                ov = self._detect_overlap(canvas, next_img)
-            else:
-                ov = 0
-            # 防止裁剪超过图片高度
-            ov = min(ov, max(next_img.height - 1, 0))
-            overlap_trimmed += ov
-            if ov > 0:
-                next_img = next_img.crop(
-                    (0, ov, next_img.width, next_img.height)
-                )
-                logger.info(f"第 {i} 张图裁剪顶部重叠 {ov}px")
-            new_h = canvas.height + next_img.height
-            new_canvas = Image.new("RGB", (min_width, new_h), "white")
-            new_canvas.paste(canvas, (0, 0))
-            new_canvas.paste(next_img, (0, canvas.height))
-            canvas = new_canvas
-
-        out_path = self._save(canvas, source_indices)
-        logger.info(
-            f"拼接 {len(scaled)} 张图 → {canvas.width}x{canvas.height}, "
-            f"裁剪重叠 {overlap_trimmed}px"
-        )
-        return StitchedImages(
-            local_path=out_path,
-            source_indices=source_indices,
-            width=canvas.width,
-            height=canvas.height,
-            is_stitched=True,
-            overlap_trimmed=overlap_trimmed,
-        )
+        finally:
+            # 关闭所有加载/创建的 PIL 图像
+            for img in created_images:
+                try:
+                    img.close()
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------
     # 图片加载与缩放
@@ -277,7 +294,8 @@ class ImageStitcher:
         """加载图片为 PIL.Image(RGB)。失败时用 ImageAsset 尺寸创建空白图。"""
         if asset.local_path and Path(asset.local_path).exists():
             try:
-                return Image.open(asset.local_path).convert("RGB")
+                img = Image.open(asset.local_path)
+                return img.convert("RGB")
             except Exception as exc:
                 logger.warning(f"图片加载失败({asset.local_path}): {exc}")
         # 兜底: 用 ImageAsset 的尺寸创建空白图
@@ -316,31 +334,43 @@ class ImageStitcher:
             return 0
 
         w = min(img_a.width, img_b.width)
-        strip_a = np.asarray(
-            img_a.crop((0, h_a - max_ov, w, h_a)).convert("RGB"),
-            dtype=np.float32,
-        )
-        strip_b = np.asarray(
-            img_b.crop((0, 0, w, max_ov)).convert("RGB"),
-            dtype=np.float32,
-        )
+        # 安全地裁剪并转换,确保所有中间 Image 对象都被关闭
+        crop_a = img_a.crop((0, h_a - max_ov, w, h_a))
+        try:
+            rgb_a = crop_a.convert("RGB")
+            try:
+                strip_a = np.asarray(rgb_a, dtype=np.float32)
+            finally:
+                rgb_a.close()
+        finally:
+            crop_a.close()
+
+        crop_b_img = img_b.crop((0, 0, w, max_ov))
+        try:
+            rgb_b = crop_b_img.convert("RGB")
+            try:
+                strip_b = np.asarray(rgb_b, dtype=np.float32)
+            finally:
+                rgb_b.close()
+        finally:
+            crop_b_img.close()
 
         # 方差守卫: 纯色区域不检测重叠(避免同色图被误判为完全重叠)
         if strip_a.std() < _OVERLAP_STD_GUARD or strip_b.std() < _OVERLAP_STD_GUARD:
             return 0
 
         best_overlap = 0
-        best_mad = _OVERLAP_MAD_THRESHOLD
-        # 从大到小搜索最大重叠
+        # 从大到小搜索:返回第一个(最大的)MAD < threshold 的 h
+        # 这样能找到最大可能重叠,而不是 MAD 全局最小值(可能偏小)
         for h in range(max_ov, _OVERLAP_MIN - 1, -1):
             bottom = strip_a[max_ov - h:]
             top = strip_b[:h]
             if bottom.shape != top.shape:
                 continue
             mad = float(np.mean(np.abs(bottom - top)))
-            if mad < best_mad:
-                best_mad = mad
+            if mad < _OVERLAP_MAD_THRESHOLD:
                 best_overlap = h
+                break  # 找到最大达标重叠即返回
         return best_overlap
 
     # ------------------------------------------------------------------
@@ -385,8 +415,8 @@ class ImageStitcher:
         if path and Path(path).exists():
             if _HAS_IMAGEHASH:
                 try:
-                    img = Image.open(path)
-                    return ("phash", imagehash.phash(img))
+                    with Image.open(path) as img:
+                        return ("phash", imagehash.phash(img))
                 except Exception as exc:
                     logger.debug(f"phash 计算失败({path}): {exc}")
             # 兜底: 文件大小 + 尺寸
@@ -419,5 +449,5 @@ class ImageStitcher:
         """保存拼接结果为 JPEG 到 data_dir/stitched/ 目录。"""
         name = "stitched_" + "_".join(str(i) for i in source_indices) + ".jpg"
         out_path = self._stitched_dir / name
-        img.save(out_path, "JPEG", quality=95)
+        img.save(out_path, "JPEG", quality=85)
         return str(out_path)
