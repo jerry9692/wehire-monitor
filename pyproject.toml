@@ -1,6 +1,6 @@
 [project]
 name = "wehire-monitor"
-version = "0.1.0"
+version = "0.3.0"
 description = "微信公众号招聘情报监控管道 | WeChat official account recruitment intelligence monitor"
 readme = "README.md"
 license = { text = "MIT" }

@@ -28,7 +28,7 @@ logger.add(
 
 app = typer.Typer(
     name="wehire-monitor",
-    help="微信公众号招聘情报监控管道 (v0.2)",
+    help="微信公众号招聘情报监控管道 (v0.3)",
     no_args_is_help=True,
 )
 
