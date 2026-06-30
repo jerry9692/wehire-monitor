@@ -15,7 +15,7 @@
 | 仓库目录 | `wehire-monitor/`                                           |
 | 含义   | We 扣微信生态、Hire 扣招聘、Monitor 扣监控；中文别名"微岗哨"（微/岗/哨）保留为 README 别称 |
 | 定位   | 面向个人低频使用的微信公众号招聘情报监控管道：把"每天刷几十个公众号"变成"每天接收一份精准招聘日报"         |
-| 非定位  | 非商业爬虫平台、不追求高并发/账号池/代理池、不自动登录、不绕强风控                          |
+| 非定位  | 非商业爬虫平台、不追求高并发/账号池/代理池、不绕强风控                          |
 
 ---
 
@@ -27,7 +27,8 @@
 | 多模态模型供应商 | 可配置多供应商           | 抽象 `MultimodalProvider` 接口，`.env` 切换，默认 MiMo-V2.5（文本+图片统一） |
 | 开源依赖        | 混合策略              | 解析层封装 `wechat-article-for-ai`；抓取层参考 `wechat_articles_spider` 思路自研        |
 | 部署形态        | 本地脚本为主，可选容器化      | v0.1–v0.3 纯本地 cron/APScheduler；v1.0 补 Dockerfile                         |
-| 细化范围        | 全量到 v1.0          | 本文覆盖 v0.1→v0.2→v0.3→v1.0 全部阶段                                            |
+| Cookie 获取    | 半自动扫码登录            | v0.4 新增 `login` 命令，纯 requests 调用微信扫码登录接口，自动获取 Cookie/Token 写入 `.env` |
+| 细化范围        | 全量到 v1.0          | 本文覆盖 v0.1→v0.2→v0.3→v0.4→v1.0 全部阶段                                            |
 
 ---
 
@@ -170,6 +171,27 @@ class Fetcher:
     def search_account(self, name: str, alias: list[str]) -> AccountMeta
     def list_articles(self, account: AccountMeta, window_hours: int = 36) -> list[ArticleMeta]
     def run(self, accounts: list[AccountConfig]) -> FetchResult
+```
+
+**扫码登录接口**（v0.4 新增，独立于 Fetcher，放在 `modules/fetcher/wechat_login.py`）：
+
+```python
+class WeChatLogin:
+    def is_cookie_valid(self) -> bool
+    def login(self) -> LoginResult  # 弹出二维码 → 轮询扫码状态 → 获取 Cookie/Token
+    def save_to_env(self, cookie: str, token: str) -> None  # 写入 .env
+```
+
+扫码登录流程（借鉴 CSDN 爬虫实战三方案，纯 requests 实现，无浏览器依赖）：
+
+```
+1. GET mp.weixin.qq.com 获取初始 Cookie（ua_id、uuid）
+2. POST bizlogin?action=startlogin 初始化登录会话
+3. GET scanloginqrcode?action=getqrcode 下载二维码图片，本地弹窗显示
+4. 轮询 GET scanloginqrcode?action=ask 等待扫码（status: 0→未扫, 6→已扫待确认, 1→已确认）
+5. POST bizlogin?action=login 完成登录，从 redirect_url 提取 token
+6. GET redirect_url 获取完整 Cookie（slave_sid、data_ticket 等）
+7. 持久化 Cookie/Token 到本地文件，有效期内复用
 ```
 
 **输入契约**：`accounts.yaml` 条目 + `.env` 中 `WECHAT_MP_COOKIE/TOKEN/USER_AGENT`。
@@ -797,7 +819,46 @@ class MultimodalProvider(Protocol):
 
 ---
 
-### 9.4 v1.0：稳定日用
+### 9.4 v0.4：半自动扫码登录
+
+**目标**：用 `wehire-monitor login` 命令替代手动 F12 复制粘贴 Cookie/Token，用户只需手机扫码，2-3 天一次。
+
+**必做工作**：
+
+1. **扫码登录模块**
+   - `modules/fetcher/wechat_login.py`：纯 requests 实现微信扫码登录
+   - 借鉴 CSDN 爬虫实战三方案，调用微信公众平台 `scanloginqrcode` 接口
+   - 流程：获取初始 Cookie → startlogin → 下载二维码 → 弹窗显示 → 轮询扫码状态 → login → 提取 token → 获取完整 Cookie
+   - 二维码图片用 Pillow 弹窗显示（`Image.show()`）
+   - 轮询间隔 2 秒，超时 120 秒
+2. **Cookie 持久化与复用**
+   - Cookie/Token 保存到本地文件（`data/wechat_cookie.json`）
+   - 启动时先检测已有 Cookie 是否有效（调用 `scanloginqrcode?action=ask` 检查 `base_resp.ret`）
+   - 有效则直接复用，无效才触发扫码
+3. **CLI 命令**
+   - `wehire-monitor login`：执行扫码登录，成功后写入 `.env`
+   - 登录成功后自动更新 `COOKIE_UPDATED_AT` 时间戳
+4. **Cookie 过期处理优化**
+   - `is_cookie_stale()` 阈值从 24h 调整为 48h（实测 Cookie 可维持 2-3 天）
+   - Cookie 失效时不报错退出，改为跳过抓取阶段、继续执行提取阶段处理已有文章
+   - 日志输出醒目提醒："Cookie 已失效，请运行 `wehire-monitor login` 重新登录"
+5. **测试**
+   - 扫码登录流程 mock 测试（mock HTTP 响应）
+   - Cookie 持久化与复用测试
+   - Cookie 失效时的降级逻辑测试
+
+**阶段验收**：
+
+- `wehire-monitor login` 能弹出二维码，扫码后自动获取 Cookie/Token 并写入 `.env`
+- Cookie 有效期内（≥2 天）连续运行无需重新登录
+- Cookie 失效时系统不崩溃，跳过抓取继续处理已有文章
+- 手动 F12 复制粘贴方式仍作为兜底保留
+
+**依赖**：v0.3 完成。
+
+---
+
+### 9.5 v1.0：稳定日用
 
 **目标**：运行看板、成本统计、错误告警、配置向导、一键重跑、可选容器化。
 
@@ -868,6 +929,7 @@ class MultimodalProvider(Protocol):
 | 每日模型调用成本  | ≤预算上限        |
 | 重复推送率           | ≤1%         |
 | Cookie 失效可感知    | 100% 推送提醒   |
+| 扫码登录成功率      | ≥95%（网络正常时）  |
 
 ---
 
@@ -876,7 +938,7 @@ class MultimodalProvider(Protocol):
 | 风险          | 影响       | 对策                       |
 | ----------- | -------- | ------------------------ |
 | 微信后台接口变动    | URL 发现失效 | 保留手动 URL 导入、第三方聚合号解析降级   |
-| Cookie 频繁失效 | 任务中断     | 每日运行前检测并提醒               |
+| Cookie 频繁失效 | 任务中断     | 半自动扫码登录（`login` 命令），2-3 天扫一次码；失效时跳过抓取不中断提取     |
 | 验证码         | 无法继续抓取   | 暂停任务，不强行重试               |
 | 长图识别错位   | 岗位字段错配   | 短图拼接 + 长图切片 + 多模态模型 + 证据字段 |
 | 模型成本不可控   | 花费上升     | 每日预算、切片上限、预过滤门控           |
@@ -938,4 +1000,5 @@ wehire-monitor/
 - `bzd6661/wechat-article-for-ai`：URL→Markdown、图片本地化、验证码检测、重试（解析层适配器封装）
 - 小米 MiMo-V2.5：默认多模态模型，文本+图片统一理解，OpenAI 兼容 API
 - 阿里 Qwen-VL-Max：备选多模态模型，视觉理解 + 文本生成
+- 微信公众平台扫码登录接口分析：纯 requests 实现扫码登录，v0.4 登录模块参考
 - `opendatalab/MinerU`：v1.0 后续复杂排版增强备选
