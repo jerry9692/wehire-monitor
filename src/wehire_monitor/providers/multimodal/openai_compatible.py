@@ -13,8 +13,7 @@
 若需逐切片调用(如 Qwen-VL),可覆写 :meth:`extract_jobs` 并复用本类的
 ``_call_api`` / ``_parse_jobs_json`` / ``_estimate_cost`` / ``_encode_image`` 等方法。
 
-参考实现: ``providers/llm/deepseek.py``(重试与 JSON 解析)、
-``providers/vlm/qwen_vl.py``(图片处理)。
+参考实现: 原 ``providers/llm/deepseek.py``(重试与 JSON 解析)。
 """
 from __future__ import annotations
 
@@ -111,7 +110,7 @@ class OpenAICompatibleProvider(MultimodalProvider):
 
     子类需设置以下类属性:
 
-    - ``name``:         Provider 名称(如 "mimo"、"qwen_vl")
+    - ``name``:         Provider 名称(如 "mimo"、"openai")
     - ``base_url``:     OpenAI 兼容 ``/chat/completions`` 端点
     - ``model``:        默认模型名
     - ``input_price``:  输入单价(元/百万 token)

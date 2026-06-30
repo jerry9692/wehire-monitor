@@ -4,7 +4,9 @@
 同一个模型同时接收文本和图片,完成结构化岗位信息提取。
 
 本模块定义统一接口 ``MultimodalProvider`` 与响应数据结构 ``MultimodalResponse``,
-供 ``openai_compatible``、``mimo``、``qwen_vl`` 等具体实现遵循。
+供 ``openai_compatible``、``mimo`` 等具体实现遵循。
+所有 OpenAI 兼容的多模态模型(GPT-4o/GPT-5、Qwen-VL、豆包、智谱等)
+通过 ``openai_compatible.OpenAICompatibleProvider`` 基类即可接入。
 """
 from __future__ import annotations
 

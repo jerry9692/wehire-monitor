@@ -1,14 +1,16 @@
 """多模态 Provider 工厂测试"""
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from wehire_monitor.providers.factory import create_multimodal_provider
 from wehire_monitor.providers.multimodal.mimo import MiMoProvider
-from wehire_monitor.providers.multimodal.qwen_vl import QwenVLProvider
+from wehire_monitor.providers.multimodal.openai_compatible import (
+    OpenAICompatibleProvider,
+)
 
 
 def test_create_multimodal_provider_mimo():
-    """mimo provider 创建成功"""
+    """mimo provider 创建成功(默认)"""
     with patch.dict("os.environ", {
         "MULTIMODAL_PROVIDER": "mimo",
         "MULTIMODAL_API_KEY": "sk-test",
@@ -18,21 +20,41 @@ def test_create_multimodal_provider_mimo():
         assert isinstance(provider, MiMoProvider)
         assert provider.name == "mimo"
         assert provider.model == "mimo-v2.5"
+        assert "xiaomimimo.com" in provider.base_url
         provider.close()
 
 
-def test_create_multimodal_provider_qwen_vl():
-    """qwen_vl provider 创建成功"""
+def test_create_multimodal_provider_openai_generic():
+    """openai 通用 provider 创建成功(可接入任意兼容模型)"""
     with patch.dict("os.environ", {
-        "MULTIMODAL_PROVIDER": "qwen_vl",
+        "MULTIMODAL_PROVIDER": "openai",
         "MULTIMODAL_API_KEY": "sk-test",
         "MULTIMODAL_MODEL": "qwen-vl-max",
+        "MULTIMODAL_BASE_URL": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "MULTIMODAL_INPUT_PRICE": "3.0",
+        "MULTIMODAL_OUTPUT_PRICE": "9.0",
     }):
         provider = create_multimodal_provider()
-        assert isinstance(provider, QwenVLProvider)
-        assert provider.name == "qwen_vl"
+        assert isinstance(provider, OpenAICompatibleProvider)
+        assert provider.name == "openai"
         assert provider.model == "qwen-vl-max"
+        assert provider.input_price == 3.0
+        assert provider.output_price == 9.0
+        assert provider.base_url == (
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+        )
         provider.close()
+
+
+def test_create_multimodal_provider_openai_missing_base_url():
+    """openai provider 缺少 MULTIMODAL_BASE_URL 抛异常"""
+    with patch.dict("os.environ", {
+        "MULTIMODAL_PROVIDER": "openai",
+        "MULTIMODAL_API_KEY": "sk-test",
+        "MULTIMODAL_MODEL": "gpt-4o",
+    }, clear=True):
+        with pytest.raises(ValueError, match="MULTIMODAL_BASE_URL"):
+            create_multimodal_provider()
 
 
 def test_create_multimodal_provider_missing_api_key():
