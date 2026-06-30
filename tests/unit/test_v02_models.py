@@ -31,9 +31,7 @@ def test_extraction_result_with_warnings():
         article_type="social_recruitment",
         jobs=[],
         warnings=["邮箱格式异常"],
-        llm_calls=1,
-        vlm_calls=0,
-        ocr_calls=0,
+        model_calls=1,
     )
     assert result.article_type == "social_recruitment"
     assert len(result.warnings) == 1

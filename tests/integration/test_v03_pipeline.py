@@ -1,4 +1,4 @@
-"""v0.3 端到端集成测试: VLM 编排+成本统计+预算耗尽"""
+"""v0.3 端到端集成测试: 多模态编排+成本统计+预算耗尽"""
 import hashlib
 from unittest.mock import patch, MagicMock
 
@@ -10,8 +10,8 @@ from wehire_monitor.domain.models import (
 )
 
 
-def test_v03_vlm_count_tracked_in_run_logs(tmp_db_path, sample_accounts_yaml, sample_rules_yaml):
-    """VLM 调用次数和成本记录到 run_logs"""
+def test_v03_model_count_tracked_in_run_logs(tmp_db_path, sample_accounts_yaml, sample_rules_yaml):
+    """模型调用次数和成本记录到 run_logs"""
     runner = PipelineRunner(
         db_path=tmp_db_path,
         accounts_path=sample_accounts_yaml,
@@ -41,8 +41,8 @@ def test_v03_vlm_count_tracked_in_run_logs(tmp_db_path, sample_accounts_yaml, sa
             deadline=Deadline(date="2026-07-31", inferred=False),
             source_evidence={}, confidence=85,
         )],
-        warnings=[], ocr_calls=1, vlm_calls=2,
-        cost_estimate=0.06,  # 2 slices * 0.03 = 0.06
+        warnings=[], model_calls=3,
+        cost_estimate=0.06,
     )
 
     with patch.object(runner.parser, "parse", return_value=parsed), \
@@ -53,14 +53,14 @@ def test_v03_vlm_count_tracked_in_run_logs(tmp_db_path, sample_accounts_yaml, sa
         mock_init_ext.return_value = mock_extractor
         runner.run()
 
-    # 检查 run_logs 中 vlm_count 和 cost_estimate
+    # 检查 run_logs 中 model_count 和 cost_estimate
     import sqlite3
     conn = sqlite3.connect(tmp_db_path)
     row = conn.execute(
-        "SELECT vlm_count, cost_estimate FROM run_logs ORDER BY started_at DESC LIMIT 1"
+        "SELECT model_count, cost_estimate FROM run_logs ORDER BY started_at DESC LIMIT 1"
     ).fetchone()
-    assert row[0] == 2  # vlm_count
-    assert row[1] > 0   # cost_estimate (2 * 0.03 = 0.06)
+    assert row[0] == 3  # model_count
+    assert row[1] > 0   # cost_estimate
     conn.close()
     runner.close()
 
@@ -89,8 +89,8 @@ def test_v03_budget_exhausted_marks_need_review(tmp_db_path, sample_accounts_yam
 
     extraction = ExtractionResult(
         article_type="unknown", jobs=[],
-        warnings=["need_review: VLM budget exhausted"],
-        ocr_calls=0, vlm_calls=0,
+        warnings=["need_review: model budget exhausted"],
+        model_calls=0,
     )
 
     with patch.object(runner.parser, "parse", return_value=parsed), \
@@ -106,8 +106,8 @@ def test_v03_budget_exhausted_marks_need_review(tmp_db_path, sample_accounts_yam
     runner.close()
 
 
-def test_v03_full_pipeline_with_vlm_and_notify(tmp_db_path, sample_accounts_yaml, sample_rules_yaml):
-    """完整管道: VLM 提取 → 匹配 → 推送"""
+def test_v03_full_pipeline_with_model_and_notify(tmp_db_path, sample_accounts_yaml, sample_rules_yaml):
+    """完整管道: 模型提取 → 匹配 → 推送"""
     with patch("wehire_monitor.config.loader.ConfigLoader.get_feishu_webhook", return_value="http://fake"), \
          patch("wehire_monitor.config.loader.ConfigLoader.get_dingtalk_webhook", return_value=None):
         runner = PipelineRunner(
@@ -139,7 +139,7 @@ def test_v03_full_pipeline_with_vlm_and_notify(tmp_db_path, sample_accounts_yaml
             deadline=Deadline(date="2026-07-31", inferred=False),
             source_evidence={}, confidence=90,
         )],
-        warnings=[], ocr_calls=1, vlm_calls=2,
+        warnings=[], model_calls=3,
         cost_estimate=0.06,
     )
 
@@ -166,13 +166,13 @@ def test_v03_full_pipeline_with_vlm_and_notify(tmp_db_path, sample_accounts_yaml
     article = runner.repo.get_article(url_hash)
     assert article["status"] in (Status.MATCHED.value, Status.ARCHIVED.value)
 
-    # 检查 VLM 统计
+    # 检查模型统计
     import sqlite3
     conn = sqlite3.connect(tmp_db_path)
     row = conn.execute(
-        "SELECT vlm_count, cost_estimate FROM run_logs ORDER BY started_at DESC LIMIT 1"
+        "SELECT model_count, cost_estimate FROM run_logs ORDER BY started_at DESC LIMIT 1"
     ).fetchone()
-    assert row[0] == 2  # vlm_count
+    assert row[0] == 3  # model_count
     assert row[1] > 0   # cost_estimate
     conn.close()
     runner.close()

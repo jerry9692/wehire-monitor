@@ -168,14 +168,8 @@ class PipelineRunner:
             pass
         try:
             if self.extractor is not None:
-                if hasattr(self.extractor, 'llm') and hasattr(self.extractor.llm, 'close'):
-                    self.extractor.llm.close()
-                if hasattr(self.extractor, 'ocr') and self.extractor.ocr is not None \
-                        and hasattr(self.extractor.ocr, 'close'):
-                    self.extractor.ocr.close()
-                if hasattr(self.extractor, 'vlm') and self.extractor.vlm is not None \
-                        and hasattr(self.extractor.vlm, 'close'):
-                    self.extractor.vlm.close()
+                if hasattr(self.extractor, 'provider') and self.extractor.provider is not None:
+                    self.extractor.provider.close()
                 self.extractor = None
         except Exception:
             pass
@@ -216,9 +210,7 @@ class PipelineRunner:
         fetched_count = 0
         candidate_count = 0
         matched_count = 0
-        total_llm_calls = 0
-        total_ocr_calls = 0
-        total_vlm_calls = 0
+        total_model_calls = 0
         total_cost = 0.0
         error_summary: str | None = None
         fatal_error = False
@@ -260,9 +252,7 @@ class PipelineRunner:
             # ========== 阶段2.5: 提取 (v0.3 含 VLM) ==========
             if "extract" in self.stages:
                 stats = self._do_extract()
-                total_llm_calls = stats["llm_calls"]
-                total_ocr_calls = stats["ocr_calls"]
-                total_vlm_calls = stats.get("vlm_calls", 0)
+                total_model_calls = stats["model_calls"]
                 total_cost = stats.get("cost_estimate", 0.0)
 
             # ========== 阶段2.6: 匹配 (v0.2) ==========
@@ -279,17 +269,14 @@ class PipelineRunner:
             ended_at=_now_iso(),
             fetched_count=fetched_count,
             candidate_count=candidate_count,
-            llm_count=total_llm_calls,
-            ocr_count=total_ocr_calls,
-            vlm_count=total_vlm_calls,
+            model_count=total_model_calls,
             cost_estimate=total_cost,
             error_summary=error_summary,
         )
         logger.info(
             f"=== 运行结束 {self.run_id}: fetched={fetched_count}, "
             f"candidates={candidate_count}, matched={matched_count}, "
-            f"llm_calls={total_llm_calls}, ocr_calls={total_ocr_calls}, "
-            f"vlm_calls={total_vlm_calls}, cost={total_cost:.4f}元 ==="
+            f"model_calls={total_model_calls}, cost={total_cost:.4f}元 ==="
         )
 
     def _do_fetch(self) -> dict:
@@ -510,42 +497,25 @@ class PipelineRunner:
         return candidate_count
 
     def _init_extractor(self):
-        """初始化 Extractor(含 VLM/Stitcher/Slicer/Budget,延迟初始化)"""
-        from wehire_monitor.providers.factory import (
-            create_llm_provider, create_ocr_provider, create_vlm_provider,
-        )
+        """初始化 Extractor(含多模态 Provider/Stitcher/Slicer/Budget,延迟初始化)"""
+        from wehire_monitor.providers.factory import create_multimodal_provider
         from wehire_monitor.modules.extractor.extractor import Extractor
         from wehire_monitor.modules.extractor.slicer import LongImageSlicer
         from wehire_monitor.modules.extractor.stitcher import ImageStitcher
         from wehire_monitor.modules.extractor.budget import BudgetManager
 
-        llm = create_llm_provider()
-        ocr = None
-        try:
-            ocr = create_ocr_provider()
-        except Exception as e:
-            logger.warning(f"OCR Provider 初始化失败(将跳过 OCR 路径): {e}")
+        provider = create_multimodal_provider()
+        logger.info(f"多模态模型 Provider 已初始化: {provider.name} ({provider.model})")
 
-        vlm = None
-        try:
-            vlm = create_vlm_provider()
-            if vlm:
-                logger.info(f"VLM Provider 已初始化: {vlm.name}")
-        except Exception as e:
-            logger.warning(f"VLM Provider 初始化失败(将跳过 VLM 路径): {e}")
-
-        # Stitcher 始终初始化(短图拼接是图片预处理步骤,不依赖 VLM)
         stitcher = ImageStitcher(data_dir=self.data_dir)
-        slicer = LongImageSlicer(data_dir=self.data_dir) if vlm else None
+        slicer = LongImageSlicer(data_dir=self.data_dir)
         budget = BudgetManager(
-            daily_budget_cny=self.rules.budget.daily_vlm_budget_cny,
+            daily_budget_cny=self.rules.budget.daily_model_budget_cny,
             max_slices_per_article=self.rules.budget.max_slices_per_article,
-        ) if vlm else None
+        )
 
         return Extractor(
-            llm_provider=llm,
-            ocr_provider=ocr,
-            vlm_provider=vlm,
+            multimodal_provider=provider,
             slicer=slicer,
             stitcher=stitcher,
             budget_manager=budget,
@@ -557,26 +527,24 @@ class PipelineRunner:
         return Matcher(self.rules.match_rules)
 
     def _do_extract(self) -> dict:
-        """对 CANDIDATE 文章执行 LLM/VLM 提取(v0.3)
+        """对 CANDIDATE 文章执行多模态模型提取(v0.3)
 
-        返回 {"llm_calls": int, "ocr_calls": int, "vlm_calls": int, "cost_estimate": float}
+        返回 {"model_calls": int, "cost_estimate": float}
         """
         if self.dry_run:
             logger.info("dry-run 模式:跳过提取")
-            return {"llm_calls": 0, "ocr_calls": 0, "vlm_calls": 0, "cost_estimate": 0.0}
+            return {"model_calls": 0, "cost_estimate": 0.0}
 
         try:
             self.extractor = self._init_extractor()
         except Exception as e:
             logger.error(f"Extractor 初始化失败: {e}")
-            return {"llm_calls": 0, "ocr_calls": 0, "vlm_calls": 0, "cost_estimate": 0.0}
+            return {"model_calls": 0, "cost_estimate": 0.0}
 
         candidates = self.repo.query_by_status(Status.CANDIDATE)
         logger.info(f"提取阶段: {len(candidates)} 篇候选文章")
 
-        total_llm = 0
-        total_ocr = 0
-        total_vlm = 0
+        total_model_calls = 0
         total_cost = 0.0
 
         for c in candidates:
@@ -599,9 +567,7 @@ class PipelineRunner:
                 )
 
                 extraction = self.extractor.extract(parsed, pf_result)
-                total_llm += extraction.llm_calls
-                total_ocr += extraction.ocr_calls
-                total_vlm += getattr(extraction, 'vlm_calls', 0)
+                total_model_calls += extraction.model_calls
                 # 使用 ExtractionResult 中的准确成本(而非硬编码估算)
                 total_cost += getattr(extraction, 'cost_estimate', 0.0)
 
@@ -675,8 +641,7 @@ class PipelineRunner:
                         pass
 
         return {
-            "llm_calls": total_llm, "ocr_calls": total_ocr,
-            "vlm_calls": total_vlm, "cost_estimate": total_cost,
+            "model_calls": total_model_calls, "cost_estimate": total_cost,
         }
 
     def _do_match(self) -> int:

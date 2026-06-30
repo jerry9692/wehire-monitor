@@ -15,7 +15,7 @@ _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 # 允许更新的 run_logs 列(白名单,防止 SQL 注入)
 _RUN_UPDATE_COLUMNS = {
     "ended_at", "fetched_count", "candidate_count",
-    "ocr_count", "llm_count", "vlm_count",
+    "model_count",
     "cost_estimate", "error_summary",
 }
 
@@ -54,10 +54,56 @@ class Repository:
             pass
 
     def init_db(self) -> None:
-        """初始化数据库(建表)"""
+        """初始化数据库(建表 + 迁移)"""
         schema_sql = _SCHEMA_PATH.read_text(encoding="utf-8")
         self.conn.executescript(schema_sql)
         self.conn.commit()
+        self._migrate_schema()
+
+    def _migrate_schema(self) -> None:
+        """数据库 schema 迁移(v0.3 多模态统一)
+
+        迁移内容:
+        1. run_logs: ocr_count/llm_count/vlm_count → model_count
+        2. articles: ocr_done → candidate, error_ocr → error_llm
+        """
+        # --- 1. run_logs: 检查 model_count 列是否存在 ---
+        cols = {
+            row["name"]
+            for row in self.conn.execute("PRAGMA table_info(run_logs)").fetchall()
+        }
+        if "model_count" not in cols:
+            logger.info("迁移: run_logs 添加 model_count 列")
+            self.conn.execute(
+                "ALTER TABLE run_logs ADD COLUMN model_count INTEGER DEFAULT 0"
+            )
+            # 从旧列迁移数据(三路计数之和)
+            old_sum_expr = " + ".join(
+                f"COALESCE({c}, 0)"
+                for c in ("ocr_count", "llm_count", "vlm_count")
+                if c in cols
+            )
+            if old_sum_expr:
+                self.conn.execute(
+                    f"UPDATE run_logs SET model_count = {old_sum_expr}"
+                )
+            self.conn.commit()
+
+        # --- 2. articles: 迁移已废弃的状态值 ---
+        # ocr_done → candidate(重新走单路提取)
+        cursor = self.conn.execute(
+            "UPDATE articles SET status = 'candidate' WHERE status = 'ocr_done'"
+        )
+        if cursor.rowcount > 0:
+            logger.info(f"迁移: {cursor.rowcount} 篇 ocr_done → candidate")
+        # error_ocr → error_llm(统一错误状态)
+        cursor = self.conn.execute(
+            "UPDATE articles SET status = 'error_llm' WHERE status = 'error_ocr'"
+        )
+        if cursor.rowcount > 0:
+            logger.info(f"迁移: {cursor.rowcount} 篇 error_ocr → error_llm")
+        if cursor.rowcount > 0:
+            self.conn.commit()
 
     def list_tables(self) -> list[str]:
         cursor = self.conn.execute(
@@ -170,7 +216,6 @@ class Repository:
             Status.PARSED.value,
             Status.ERROR_FETCH.value,
             Status.ERROR_PARSE.value,
-            Status.ERROR_OCR.value,
             Status.ERROR_LLM.value,
             # CANDIDATE 也应包含(已预过滤待提取)
             Status.CANDIDATE.value,
@@ -216,7 +261,7 @@ class Repository:
         """查询最近 N 条运行日志(按开始时间倒序)"""
         cursor = self.conn.execute(
             """SELECT run_id, started_at, ended_at, fetched_count, candidate_count,
-                      ocr_count, llm_count, vlm_count, cost_estimate, error_summary
+                      model_count, cost_estimate, error_summary
                FROM run_logs
                ORDER BY started_at DESC
                LIMIT ?""",

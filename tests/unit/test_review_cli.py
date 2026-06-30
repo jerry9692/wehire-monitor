@@ -119,9 +119,7 @@ def test_run_stats(mock_cls):
             "ended_at": "2026-06-28T08:45:00+00:00",
             "fetched_count": 30,
             "candidate_count": 5,
-            "ocr_count": 2,
-            "llm_count": 3,
-            "vlm_count": 1,
+            "model_count": 6,
             "cost_estimate": 0.15,
             "error_summary": None,
         },
@@ -131,9 +129,7 @@ def test_run_stats(mock_cls):
             "ended_at": "2026-06-27T08:50:00+00:00",
             "fetched_count": 20,
             "candidate_count": 3,
-            "ocr_count": 1,
-            "llm_count": 2,
-            "vlm_count": 0,
+            "model_count": 3,
             "cost_estimate": 0.08,
             "error_summary": "Cookie expired",
         },
@@ -151,9 +147,7 @@ def test_run_stats(mock_cls):
     # 表头关键字段
     assert "fetched" in result.output
     assert "cand" in result.output
-    assert "llm" in result.output
-    assert "ocr" in result.output
-    assert "vlm" in result.output
-    assert "cost" in result.output
+    assert "模型调用" in result.output
+    assert "成本" in result.output
     # error 列内容
     assert "Cookie expired" in result.output

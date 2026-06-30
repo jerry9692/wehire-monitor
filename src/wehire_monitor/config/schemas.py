@@ -57,7 +57,7 @@ class ScheduleConfig(BaseModel):
 
 class BudgetConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    daily_vlm_budget_cny: float = 5.0
+    daily_model_budget_cny: float = 5.0
     max_slices_per_article: int = 8
 
 

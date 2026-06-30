@@ -3,11 +3,11 @@
 状态流转:
     discovered → fetched → parsed → ignored | candidate → notified → archived
 
-预留 OCR/LLM 阶段(v0.2+):
-    candidate → ocr_done → extracted → validated → matched → notified
+预留 LLM 阶段(v0.2+):
+    candidate → extracted → validated → matched → notified
 
 错误分支:
-    error_fetch, error_parse, error_ocr, error_llm,
+    error_fetch, error_parse, error_llm,
     need_cookie, need_captcha, need_review
 """
 from enum import Enum
@@ -22,8 +22,7 @@ class Status(str, Enum):
     NOTIFIED = "notified"
     ARCHIVED = "archived"
 
-    # OCR/LLM 预留(v0.2+)
-    OCR_DONE = "ocr_done"
+    # LLM 预留(v0.2+)
     EXTRACTED = "extracted"
     VALIDATED = "validated"
     MATCHED = "matched"
@@ -31,7 +30,6 @@ class Status(str, Enum):
     # 错误状态
     ERROR_FETCH = "error_fetch"
     ERROR_PARSE = "error_parse"
-    ERROR_OCR = "error_ocr"
     ERROR_LLM = "error_llm"
 
     # 待处理状态

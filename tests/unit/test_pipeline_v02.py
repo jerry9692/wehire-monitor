@@ -46,7 +46,7 @@ def test_extract_stage_processes_candidate_articles(tmp_db_path, sample_accounts
             deadline=Deadline(date="2026-07-31", inferred=False),
             source_evidence={}, confidence=85,
         )],
-        warnings=[], llm_calls=1,
+        warnings=[], model_calls=1,
     )
 
     with patch.object(runner.parser, "parse", return_value=parsed), \
@@ -97,7 +97,7 @@ def test_extract_stage_matched_article_transitions_to_matched(tmp_db_path, sampl
         source_evidence={}, confidence=90,
     )
     extraction = ExtractionResult(
-        article_type="social_recruitment", jobs=[job], warnings=[], llm_calls=1,
+        article_type="social_recruitment", jobs=[job], warnings=[], model_calls=1,
     )
 
     # 匹配分 >= notify_min_score(70)
@@ -144,7 +144,7 @@ def test_extract_stage_no_jobs_archived(tmp_db_path, sample_accounts_yaml, sampl
     )
 
     extraction = ExtractionResult(
-        article_type="non_recruitment", jobs=[], warnings=[], llm_calls=1,
+        article_type="non_recruitment", jobs=[], warnings=[], model_calls=1,
     )
 
     with patch.object(runner.parser, "parse", return_value=parsed), \
@@ -256,7 +256,7 @@ def test_need_review_status_set_for_low_quality_ocr(tmp_db_path, sample_accounts
     extraction = ExtractionResult(
         article_type="unknown", jobs=[],
         warnings=["need_review: OCR quality 0.30 < 0.45"],
-        ocr_calls=2,
+        model_calls=2,
     )
 
     with patch.object(runner.parser, "parse", return_value=parsed), \

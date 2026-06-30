@@ -1025,7 +1025,7 @@ wheels = [
 
 [[package]]
 name = "wehire-monitor"
-version = "0.1.0"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "apscheduler" },
@@ -1034,6 +1034,8 @@ dependencies = [
     { name = "imagehash" },
     { name = "loguru" },
     { name = "lxml" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.5.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "pillow" },
     { name = "pydantic" },
     { name = "python-dotenv" },
@@ -1055,6 +1057,7 @@ requires-dist = [
     { name = "imagehash", specifier = ">=4" },
     { name = "loguru", specifier = ">=0.7" },
     { name = "lxml", specifier = ">=5" },
+    { name = "numpy", specifier = ">=1.24" },
     { name = "pillow", specifier = ">=10" },
     { name = "pydantic", specifier = ">=2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },

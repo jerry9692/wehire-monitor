@@ -63,22 +63,16 @@ def run(
                 typer.echo("暂无运行记录")
                 return
             typer.echo(f"最近 {len(runs)} 条运行记录:")
-            header = (
-                f"{'run_id':<16} {'fetched':>8} {'cand':>6} "
-                f"{'llm':>5} {'ocr':>5} {'vlm':>5} {'cost':>8} error"
-            )
-            typer.echo(header)
             typer.echo("-" * 80)
             for r in runs:
                 error = r.get("error_summary") or "-"
+                model_count = r.get("model_count", 0) or 0
                 cost = r.get("cost_estimate") or 0
                 typer.echo(
-                    f"{r['run_id'][:16]:<16} {r.get('fetched_count', 0) or 0:>8} "
-                    f"{r.get('candidate_count', 0) or 0:>6} "
-                    f"{r.get('llm_count', 0) or 0:>5} "
-                    f"{r.get('ocr_count', 0) or 0:>5} "
-                    f"{r.get('vlm_count', 0) or 0:>5} "
-                    f"{cost:>8.2f} {error}"
+                    f"{r['run_id'][:16]:<16} "
+                    f"fetched={r.get('fetched_count', 0) or 0} "
+                    f"cand={r.get('candidate_count', 0) or 0} | "
+                    f"模型调用: {model_count} 次, 成本: {cost:.4f} 元 | {error}"
                 )
         return
 

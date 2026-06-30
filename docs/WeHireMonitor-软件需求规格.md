@@ -24,7 +24,7 @@
 | 决策项         | 选定方案              | 落地影响                                                                     |
 | ----------- | ----------------- | ------------------------------------------------------------------------ |
 | 整体架构        | 方案 C：分层单体 + 插件式抽象 | 单 Python 包部署，内部分层严格、模块边界清晰，状态机驱动、可断点续跑                                   |
-| LLM/VLM 供应商 | 可配置多供应商           | 抽象 `LLMProvider`/`VLMProvider` 接口，`.env` 切换，默认 DeepSeek（文本）+ Qwen-VL（视觉） |
+| 多模态模型供应商 | 可配置多供应商           | 抽象 `MultimodalProvider` 接口，`.env` 切换，默认 MiMo-V2.5（文本+图片统一） |
 | 开源依赖        | 混合策略              | 解析层封装 `wechat-article-for-ai`；抓取层参考 `wechat_articles_spider` 思路自研        |
 | 部署形态        | 本地脚本为主，可选容器化      | v0.1–v0.3 纯本地 cron/APScheduler；v1.0 补 Dockerfile                         |
 | 细化范围        | 全量到 v1.0          | 本文覆盖 v0.1→v0.2→v0.3→v1.0 全部阶段                                            |
@@ -47,10 +47,7 @@
 | HTML 解析     | `beautifulsoup4` + `lxml`                   | ^4.12 / ^5 | 正文抽取自研兜底                                                              |
 | 浏览器渲染兜底     | `playwright`                                | ^1.44      | HTML 解析失败时渲染（仅按需启用）                                                   |
 | Markdown 转换 | 封装 `wechat-article-for-ai`，兜底 `markdownify` | -          | URL→Markdown + 图片本地化                                                  |
-| 图片处理        | `Pillow`                                    | ^10        | 切片、缩放、格式归一                                                            |
-| 感知哈希        | `imagehash`                                 | ^4         | 图片去重                                                                  |
-| OCR（默认）     | `rapidocr-onnxruntime`                      | ^1.3       | CPU 本地 OCR，轻量                                                         |
-| OCR（备选）     | `paddleocr`                                 | ^2.7       | 高精度备选，依赖较重                                                            |
+| 图片处理        | `Pillow` + `imagehash`                       | ^10 / ^4   | 图片拼接、切片、缩放、感知哈希去重                                                     |
 | 数据校验        | `pydantic`                                  | ^2         | 配置校验、LLM JSON 输出校验、领域模型                                               |
 | 存储          | `sqlite3`（标准库）                              | -          | 单文件数据库，纯驱动 + dataclass 映射                                             |
 | 调度          | `apscheduler`                               | ^3.10      | 跨平台定时（Windows 友好）                                                     |
@@ -59,15 +56,13 @@
 | 日志          | `loguru`                                    | ^0.7       | 结构化日志、文件轮转                                                            |
 | 测试          | `pytest` + `pytest-mock`                    | ^8         | 单元 + 集成测试                                                             |
 
-### 2.3 LLM/VLM 供应商（默认实现）
+### 2.3 多模态模型供应商（默认实现）
 
-| 角色     | 默认 Provider               | 备选                                     | 切换方式            |
-| ------ | ------------------------- | -------------------------------------- | --------------- |
-| 文本 LLM | DeepSeek（`deepseek-chat`） | Qwen-Plus / GPT-4o-mini / Claude Haiku | `LLM_PROVIDER=` |
-| 视觉 VLM | Qwen-VL（`qwen-vl-max`）    | GPT-4o / Claude Sonnet                 | `VLM_PROVIDER=` |
-| OCR    | RapidOCR（本地）              | PaddleOCR                              | `OCR_PROVIDER=` |
+| 角色       | 默认 Provider        | 备选                                   | 切换方式                   |
+| -------- | ------------------ | ------------------------------------ | ---------------------- |
+| 多模态模型    | MiMo-V2.5（小米）      | Qwen-VL-Max / GPT-4o / Claude Sonnet | `MULTIMODAL_PROVIDER=` |
 
-所有 Provider 经统一抽象接口，Prompt 与 Provider 解耦（见 §7）。
+多模态模型同时处理文本和图片，不再需要独立的 OCR 或文本 LLM。所有 Provider 经统一 `MultimodalProvider` 接口，Prompt 与 Provider 解耦（见 §7）。
 
 ---
 
@@ -83,14 +78,12 @@ wehire-monitor/
 │   ├── fetcher/    # 订阅与抓取
 │   ├── parser/     # 解析与图片本地化
 │   ├── prefilter/  # 关键词预过滤与评分
-│   ├── extractor/  # OCR/文本LLM/VLM 混合提取
+│   ├── extractor/  # 多模态模型统一提取（文本+图片）
 │   ├── matcher/    # 用户规则匹配
 │   ├── notifier/   # 飞书/钉钉推送
 │   └── storage/    # SQLite 仓库
 ├── providers/      # 插件式抽象层
-│   ├── llm/        # LLMProvider 抽象 + 实现
-│   ├── vlm/        # VLMProvider 抽象 + 实现
-│   └── ocr/        # OCRProvider 抽象 + 实现
+│   └── multimodal/ # MultimodalProvider 抽象 + 实现（统一文本+图片）
 ├── domain/         # 领域模型（dataclass/pydantic）
 ├── config/         # 配置加载与校验
 ├── infra/          # HTTP 客户端、限频器、重试、时钟
@@ -102,9 +95,9 @@ wehire-monitor/
 1. **分层单体**：单一 Python 包，进程内调用；不引入消息队列/微服务。
 2. **模块边界清晰**：每个 module 有一个明确职责、定义良好的入口函数、可独立 CLI 调用与单元测试。
 3. **状态机驱动**：每篇文章是一个状态机实例，阶段间通过 SQLite 状态字段推进，可断点续跑、单独重跑。
-4. **Provider 无关**：LLM/VLM/OCR 经抽象接口，业务层只依赖接口，供应商经 `.env` 切换。
-5. **成本控制前置**：预过滤门控 + OCR 质量门控 + 每日预算硬上限，三层把关。
-6. **可观测**：每次运行生成 `run_id`，原始 HTML/Markdown/OCR/LLM JSON 留档 7–30 天，`run_logs` 记录统计。
+4. **Provider 无关**：多模态模型经抽象 `MultimodalProvider` 接口，业务层只依赖接口，供应商经 `.env` 切换。
+5. **成本控制前置**：预过滤门控 + 每日预算硬上限，两层把关。
+6. **可观测**：每次运行生成 `run_id`，原始 HTML/Markdown/多模态模型 JSON 留档 7–30 天，`run_logs` 记录统计。
 
 ### 3.3 数据流
 
@@ -115,8 +108,8 @@ flowchart LR
     C --> D["parser<br/>HTML→正文+图片本地化"]
     D --> E["prefilter<br/>关键词评分门控"]
     E -->|score<30| X["ignored 归档"]
-    E -->|score>=50| F["extractor<br/>双路/三路提取"]
-    E -->|30-49| F2["OCR 抽样复核→candidate"]
+    E -->|score>=50| F["extractor<br/>统一多模态提取"]
+    E -->|30-49| F2["候选待提取→candidate"]
     F2 --> F
     F --> G["matcher<br/>用户规则匹配"]
     G --> H["storage<br/>去重入库"]
@@ -134,10 +127,8 @@ stateDiagram-v2
     fetched --> error_parse: 解析失败
     parsed --> ignored: prefilter score<30
     parsed --> candidate: prefilter score>=30
-    candidate --> ocr_done: OCR 完成
-    candidate --> extracted: 纯文本路径
-    ocr_done --> extracted: 文本LLM
-    ocr_done --> need_review: OCR低质且预算耗尽
+    candidate --> extracted: 多模态模型提取
+    candidate --> need_review: 预算耗尽
     extracted --> validated: 字段校验通过
     extracted --> need_review: 置信度<60/邮箱异常
     validated --> matched: 命中用户规则
@@ -154,8 +145,8 @@ stateDiagram-v2
 
 ```
 discovered, fetched, parsed, ignored, candidate,
-ocr_done, extracted, validated, matched, notified, archived,
-error_fetch, error_parse, error_ocr, error_llm,
+extracted, validated, matched, notified, archived,
+error_fetch, error_parse, error_llm,
 need_cookie, need_captcha, need_review
 ```
 
@@ -261,7 +252,7 @@ class ParsedArticle:
 
 ### 4.3 prefilter（关键词预过滤与评分）
 
-**职责**：基于标题/摘要/正文前 1000 字/图片 OCR 抽样，计算招聘分，门控是否进入 AI 提取。
+**职责**：基于标题/摘要/正文前 1000 字/图片 alt 文本，计算招聘分，门控是否进入 AI 提取。
 
 **接口签名**：
 
@@ -279,7 +270,7 @@ class Prefilter:
 **门控**：
 
 - `score >= 50` → `candidate`，直接进入提取
-- `30 <= score < 50` → `candidate`，先 OCR 抽样复核
+- `30 <= score < 50` → `candidate`，候选待提取
 - `score < 30` → `ignored`
 
 **输出契约**：
@@ -289,14 +280,14 @@ class Prefilter:
 class PrefilterResult:
     score: int
     reasons: list[str]
-    decision: Literal["extract", "ocr_review", "ignore"]
+    decision: Literal["extract", "ignore"]
 ```
 
 强命中词/强排除词字典维护在 `config/keywords.yaml`，支持热更新。
 
 ### 4.4 extractor（AI 混合智能提取）
 
-**职责**：对候选招聘文章，按双路/三路切换逻辑，调用 OCR/文本LLM/VLM 提取结构化岗位，校验归一化。
+**职责**：对候选招聘文章，调用统一多模态模型提取结构化岗位，校验归一化。
 
 **接口签名**：
 
@@ -305,26 +296,16 @@ class Extractor:
     def extract(self, article: ParsedArticle, prefilter: PrefilterResult) -> ExtractionResult
 ```
 
-**双路切换逻辑**（承接 PRD §8.3.1）：
+**统一多模态提取逻辑**（承接 PRD §8.3.1）：
 
 ```
-正文>=500字 且含岗位/投递信息 → 文本 LLM
-否则 有图片 → OCR → 质量评分(ocr_quality_score)
-  ocr_quality_score>=0.72 → OCR文本 + 原文 → 文本 LLM
-  0.45<=ocr_quality_score<0.72 → 低成本 VLM 复核（v0.2 暂走文本 LLM，v0.3 起接 VLM）
-  ocr_quality_score<0.45 或长图复杂 → 长图切片 → VLM
+1. 短图拼接: 微信长图被拆成多张短图时拼回原图
+2. 长图检测: 任一图片高度超过模型分辨率限制 → 长图切片
+3. 统一多模态模型提取: 文本+图片同一模型同一 API
+4. 预算检查: 每日成本超上限则转 need_review
 ```
 
-**OCR 质量评分**（承接 PRD §8.3.1）：
-
-```
-ocr_quality_score =
-  0.35*平均识别置信度
-+ 0.25*中英文有效字符比例
-+ 0.20*邮箱/电话/日期/地点正则命中
-+ 0.10*文本行顺序稳定性
-+ 0.10*岗位关键词覆盖率
-```
+多模态模型同时具备文本理解和图片识别能力，不再需要 OCR 中间步骤和三路切换逻辑。
 
 **长图切片策略**（承接 PRD §8.3.2）：
 
@@ -333,7 +314,7 @@ ocr_quality_score =
 - 原宽 >1440px 等比缩放到 1440px
 - 每切片元信息：`image_index/slice_index/y_start/y_end`
 - 底部含邮箱/二维码/报名方式切片强制保留
-- 每篇最多 8 切片，超过先 OCR 找关键区域
+- 每篇最多 8 切片，超过先低分辨率预览找关键区域
 
 **切片去重合并**：
 
@@ -343,7 +324,7 @@ ocr_quality_score =
 邮箱冲突 → 保留正则合法且置信度高者，标记 conflict
 ```
 
-**Prompt**：文本 LLM Prompt 与 VLM Prompt 模板见 PRD §8.3.3/§8.3.4，本项目将其外置为 `providers/prompts/*.txt`，与 Provider 解耦。
+**Prompt**：统一多模态 Prompt 模板见 PRD §8.3.3，本项目将其外置为 `providers/prompts/*.txt`，与 Provider 解耦。
 
 **输出契约**：
 
@@ -365,9 +346,8 @@ class ExtractionResult:
     article_type: Literal["social_recruitment","campus_recruitment","internship","non_recruitment","unknown"]
     jobs: list[Job]
     warnings: list[str]
-    llm_calls: int
-    vlm_calls: int
-    ocr_calls: int
+    model_calls: int  # 多模态模型 API 调用次数
+    cost_estimate: float  # 估算成本(元)
 ```
 
 **后处理校验**：
@@ -498,9 +478,7 @@ CREATE TABLE run_logs (
   ended_at TEXT,
   fetched_count INTEGER DEFAULT 0,
   candidate_count INTEGER DEFAULT 0,
-  ocr_count INTEGER DEFAULT 0,
-  llm_count INTEGER DEFAULT 0,
-  vlm_count INTEGER DEFAULT 0,
+  model_count INTEGER DEFAULT 0,     -- 多模态模型调用次数
   cost_estimate REAL DEFAULT 0,
   error_summary TEXT
 );
@@ -562,7 +540,7 @@ schedule:
   max_articles_per_account: 10
 
 budget:
-  daily_vlm_budget_cny: 5.0
+  daily_model_budget_cny: 5.0
   max_slices_per_article: 8
 ```
 
@@ -574,15 +552,10 @@ WECHAT_MP_TOKEN=...
 WECHAT_USER_AGENT=...
 COOKIE_UPDATED_AT=2026-06-28 08:00:00
 
-LLM_PROVIDER=deepseek
-LLM_API_KEY=...
-LLM_MODEL=deepseek-chat
-
-VLM_PROVIDER=qwen_vl
-VLM_API_KEY=...
-VLM_MODEL=qwen-vl-max
-
-OCR_PROVIDER=rapid
+MULTIMODAL_PROVIDER=mimo
+MULTIMODAL_API_KEY=...
+MULTIMODAL_MODEL=mimo-v2.5
+MULTIMODAL_BASE_URL=https://api.xiaomimimo.com/v1
 
 FEISHU_WEBHOOK=...
 DINGTALK_WEBHOOK=...
@@ -597,35 +570,32 @@ DINGTALK_WEBHOOK=...
 ### 7.1 接口定义
 
 ```python
-# providers/llm/base.py
-class LLMProvider(Protocol):
+# providers/multimodal/base.py
+class MultimodalProvider(Protocol):
     name: str
-    def extract_jobs(self, text: str, meta: ArticleMeta) -> ExtractionResult: ...
-
-# providers/vlm/base.py
-class VLMProvider(Protocol):
-    name: str
-    def extract_jobs_from_slices(self, slices: list[ImageSlice], meta: ArticleMeta) -> ExtractionResult: ...
-
-# providers/ocr/base.py
-class OCRProvider(Protocol):
-    name: str
-    def ocr(self, image_path: str) -> OCRResult: ...
+    def extract_jobs(
+        self,
+        text: str | None,
+        images: list[ImageSlice] | None,
+        meta: ArticleMeta,
+    ) -> ExtractionResult: ...
 ```
+
+多模态模型同时处理文本和图片，一个接口替代原来的 LLMProvider + VLMProvider + OCRProvider。
 
 ### 7.2 工厂与切换
 
 `providers/factory.py` 读取 `.env`，返回对应实现：
 
-- `LLM_PROVIDER=deepseek` → `providers/llm/deepseek.py`
-- `VLM_PROVIDER=qwen_vl` → `providers/vlm/qwen_vl.py`
-- `OCR_PROVIDER=rapid` → `providers/ocr/rapid.py`
+- `MULTIMODAL_PROVIDER=mimo` → `providers/multimodal/mimo.py`
+- `MULTIMODAL_PROVIDER=qwen_vl` → `providers/multimodal/qwen_vl.py`
+- `MULTIMODAL_PROVIDER=openai` → `providers/multimodal/openai.py`
 
 新增供应商只需实现接口 + 注册工厂，业务层零改动。
 
 ### 7.3 Prompt 与 Provider 解耦
 
-- Prompt 模板外置 `providers/prompts/text_llm.txt`、`providers/prompts/vlm.txt`
+- Prompt 模板外置 `providers/prompts/multimodal.txt`
 - 模板变量：`{{title}}`、`{{publish_time}}`、`{{content}}`、`{{image_index}}`、`{{slice_index}}`、`{{y_start}}`、`{{y_end}}`
 - Provider 实现负责把模板 + 变量组装成自家 API 请求体，并解析返回为统一 `ExtractionResult`
 
@@ -633,18 +603,15 @@ class OCRProvider(Protocol):
 
 ## 8. 成本控制与风控
 
-### 8.1 三层门控
+### 8.1 两层门控
 
-1. **预过滤门控**：`score<30` 丢弃，`30-49` 仅 OCR 抽样，`>=50` 进入提取。非招聘文章不进 LLM。
-2. **OCR 质量门控**：`score>=0.72` 用文本 LLM（便宜）；`<0.72` 才考虑 VLM。
-3. **预算硬上限**：`budget.daily_vlm_budget_cny` 耗尽即停止 VLM，剩余转 `need_review`。
+1. **预过滤门控**：`score<30` 丢弃，`>=30` 进入提取。非招聘文章不进模型。
+2. **预算硬上限**：`budget.daily_model_budget_cny` 耗尽即停止模型调用，剩余转 `need_review`。
 
 ### 8.2 指标
 
-- VLM 调用率：候选招聘文章 ≤20%
-- 文本 LLM 用低成本模型
-- OCR 优先本地
-- VLM 只处理关键切片，不整篇上传
+- 多模态模型使用低成本国产模型（如 MiMo-V2.5，0.7 元/百万输入 token）
+- 长图切片处理，每篇最多 8 切片，不整篇上传
 - `run_logs.cost_estimate` 每次记录
 
 ### 8.3 风控合规
@@ -732,48 +699,43 @@ class OCRProvider(Protocol):
 
 ### 9.2 MVP v0.2：能提取
 
-**目标**：接入 OCR + 文本 LLM，输出结构化岗位表，邮箱正则校验，用户规则匹配，日报升级为结构化表格。
+**目标**：接入多模态模型，输出结构化岗位表，邮箱正则校验，用户规则匹配，日报升级为结构化表格。
 
 **必做工作**：
 
 1. **Provider 抽象层**
-   - `providers/ocr/base.py` + `providers/ocr/rapid.py`（RapidOCR 实现）
-   - `providers/llm/base.py` + `providers/llm/deepseek.py`（DeepSeek 实现）
+   - `providers/multimodal/base.py` + `providers/multimodal/mimo.py`（MiMo-V2.5 实现）
    - `providers/factory.py` 工厂切换
-   - `.env` 增加 `LLM_PROVIDER/LLM_API_KEY/LLM_MODEL/OCR_PROVIDER`
+   - `.env` 增加 `MULTIMODAL_PROVIDER/MULTIMODAL_API_KEY/MULTIMODAL_MODEL/MULTIMODAL_BASE_URL`
 2. **Prompt 模板**
-   - `providers/prompts/text_llm.txt`（PRD §8.3.3）
+   - `providers/prompts/multimodal.txt`（PRD §8.3.3）
    - 模板变量渲染
-3. **extractor 双路切换**
-   - 正文≥500 字且含岗位/投递 → 文本 LLM
-   - 否则 OCR → `score>=0.72` → OCR文本+原文 → 文本 LLM
-   - `0.45<=score<0.72` 暂走文本 LLM（VLM 留 v0.3）
-   - `score<0.45` → `need_review`
-   - 状态迁移：`candidate→ocr_done→extracted`
-4. **OCR 质量评分**
-   - `extractor/ocr_quality.py` 实现 §4.4 评分公式
-5. **JSON Schema 校验**
+3. **extractor 统一提取**
+   - 多模态模型同时处理文本和图片
+   - 有图片时传图，无图片时传文本
+   - 状态迁移：`candidate→extracted`
+4. **JSON Schema 校验**
    - `pydantic` 模型 `ExtractionResult`/`Job`/`Deadline`
-   - LLM 输出 JSON 解析失败 → 重试 1 次 → `error_llm`
-6. **后处理校验**
+   - 模型输出 JSON 解析失败 → 重试 1 次 → `error_llm`
+5. **后处理校验**
    - 邮箱正则 + `email` 与 `email_chars` 一致性 → 不一致 `email_mismatch`→`need_review`
    - 截止日期早于发布时间标记异常
    - `confidence<60` 进复核区
    - 地点空但含城市词二次抽取
-7. **matcher**
+6. **matcher**
    - `rules.yaml` 加载
    - locations/job_keywords/companies include/exclude 加权
    - `match_score` 计算，阈值门控
    - 状态迁移：`validated→matched/archived`
-8. **notifier 升级**
+7. **notifier 升级**
    - 日报改为结构化岗位表（公司/岗位/地点/截止/投递/来源）
    - 复核区单独列出
    - 邮箱脱敏（`email_mask`）
-9. **成本统计**
-   - `run_logs` 记录 `llm_count`/`ocr_count`
+8. **成本统计**
+   - `run_logs` 记录 `model_count`/`cost_estimate`
    - CLI `run --stats` 查看本次统计
-10. **测试**
-    - `extractor` 双路切换测试（mock provider）
+9. **测试**
+    - `extractor` 统一提取测试（mock provider）
     - `matcher` 规则匹配测试
     - 邮箱校验边界测试
     - Provider 工厂切换测试
@@ -784,7 +746,6 @@ class OCRProvider(Protocol):
 - 公司/岗位/地点整体可用率 ≥90%
 - 非招聘文章过滤准确率 ≥85%
 - 招聘文章漏检率 ≤10%
-- VLM 调用 = 0（本阶段不接 VLM）
 
 **依赖**：v0.1 完成。
 
@@ -792,46 +753,44 @@ class OCRProvider(Protocol):
 
 ### 9.3 MVP v0.3：能处理长图
 
-**目标**：长图识别 + 切片 + VLM 兜底 + 置信度门控 + 人工复核队列 + 每日预算上限。
+**目标**：短图拼接 + 长图切片 + 每日预算上限 + 置信度门控 + 人工复核队列。
 
 **必做工作**：
 
-1. **VLM Provider**
-   - `providers/vlm/base.py` + `providers/vlm/qwen_vl.py`（Qwen-VL 实现）
-   - `providers/prompts/vlm.txt`（PRD §8.3.4）
-   - 工厂注册
+1. **短图拼接**
+   - `extractor/stitcher.py`：微信长图被拆成多张短图时拼回原图
+   - 感知哈希去重、边界重叠检测、SVG 跳过、宽度分组
 2. **长图识别与切片**
-   - `extractor/slicer.py`：单图高度>3000px 且 OCR 文本<300 字触发
+   - `extractor/slicer.py`：单图高度超过模型分辨率限制时触发
    - 切片参数：高度 1800px、重叠 220px、宽>1440 缩放
    - 切片元信息 `image_index/slice_index/y_start/y_end`
    - 底部含邮箱/二维码切片强制保留
-   - 每篇最多 8 切片，超过先 OCR 找关键区域
-3. **VLM 提取与合并**
-   - VLM 三路触发条件（§4.4）
+   - 每篇最多 8 切片，超过先低分辨率预览找关键区域
+3. **切片结果合并**
    - 切片结果合并去重（岗位唯一键、字段完整者优先、邮箱冲突标记）
-   - 状态迁移：`ocr_done→extracted` / `need_review`
+   - 状态迁移：`candidate→extracted` / `need_review`
 4. **预算硬上限**
-   - `budget.daily_vlm_budget_cny` 读取
-   - `extractor/budget.py` 累计花费，耗尽停止 VLM → `need_review`
+   - `budget.daily_model_budget_cny` 读取
+   - `extractor/budget.py` 累计花费，耗尽停止模型调用 → `need_review`
    - `max_slices_per_article` 限制
 5. **人工复核队列**
    - `need_review` 状态文章列表 CLI：`wehire-monitor review --list`
    - 复核后手动标注/确认，状态推进
 6. **成本统计完善**
-   - `run_logs.vlm_count`/`cost_estimate`
+   - `run_logs.model_count`/`cost_estimate`
    - 每日预算消耗展示
 7. **测试**
+   - 拼接算法测试（感知哈希、边界重叠、宽度分组）
    - 切片算法测试（边界、重叠、缩放）
-   - VLM mock 提取 + 合并去重测试
-   - 预算耗尽停 VLM 测试
+   - 模型 mock 提取 + 合并去重测试
+   - 预算耗尽停模型测试
    - 端到端长图文章处理测试
 
 **阶段验收**：
 
-- VLM 调用占比 ≤20%（候选招聘文章）
 - 长图招聘信息可结构化提取，岗位行列不错配
 - 邮箱逐字符识别，不确定标记 `?` 进复核
-- 每日 VLM 花费 ≤预算上限
+- 每日模型花费 ≤预算上限
 - 重复推送率 ≤1%
 
 **依赖**：v0.2 完成。
@@ -846,10 +805,10 @@ class OCRProvider(Protocol):
 
 1. **本地 HTML 报告/看板**
    - `notifier/report.py` 生成 `data/report.html`
-   - 内容：每日抓取/候选/命中/VLM 花费趋势、错误分布、复核队列
+   - 内容：每日抓取/候选/命中/模型花费趋势、错误分布、复核队列
    - CLI `wehire-monitor report --open`
 2. **周报统计**
-   - 每周自动汇总：抓取数、命中数、误报数、VLM 花费
+   - 每周自动汇总：抓取数、命中数、误报数、模型花费
    - 推送周报到飞书/钉钉
 3. **错误告警**
    - Cookie 失效、连续失败、预算异常 → 即时推送告警
@@ -863,7 +822,7 @@ class OCRProvider(Protocol):
    - 数据卷挂载 `data/`、`config/`、`.env`
    - 支持 `docker compose run wehire-monitor run`
 7. **数据归档与清理**
-   - 原始 HTML/Markdown/OCR/LLM JSON 留档 7–30 天自动清理
+   - 原始 HTML/Markdown/多模态模型 JSON 留档 7–30 天自动清理
    - SQLite 可选加密备份
 8. **可观测增强**
    - 日志中邮箱脱敏
@@ -889,7 +848,7 @@ class OCRProvider(Protocol):
 
 | 维度  | 要求                              | 落地                          |
 | --- | ------------------------------- | --------------------------- |
-| 成本  | VLM≤20%、每日预算上限、OCR 本地、文本 LLM 低价 | 三层门控 + `budget` 配置          |
+| 成本  | 每日预算上限、多模态模型低成本（MiMo-V2.5）  | 两层门控 + `budget` 配置          |
 | 稳定  | 单篇失败不影响整批、可重跑、状态机推进             | 状态机 + `run_id` + 原始留档       |
 | 风控  | 低频、不绕验证码、不账号池、遇风控降频             | 限频器 + 异常处理表                 |
 | 安全  | Cookie/Key 入 `.env`、不入日志、邮箱可脱敏  | `python-dotenv` + loguru 过滤 |
@@ -906,7 +865,7 @@ class OCRProvider(Protocol):
 | 邮箱提取准确率         | ≥98%，不确定进复核 |
 | 公司/岗位/地点整体可用率   | ≥90%        |
 | 单次任务耗时（20–30 号） | ≤45 分钟      |
-| VLM 调用占比（候选文章）  | ≤20%        |
+| 每日模型调用成本  | ≤预算上限        |
 | 重复推送率           | ≤1%         |
 | Cookie 失效可感知    | 100% 推送提醒   |
 
@@ -919,8 +878,8 @@ class OCRProvider(Protocol):
 | 微信后台接口变动    | URL 发现失效 | 保留手动 URL 导入、第三方聚合号解析降级   |
 | Cookie 频繁失效 | 任务中断     | 每日运行前检测并提醒               |
 | 验证码         | 无法继续抓取   | 暂停任务，不强行重试               |
-| 长图 OCR 错位   | 岗位字段错配   | OCR 质量评分 + VLM 切片 + 证据字段 |
-| VLM 成本不可控   | 花费上升     | 每日预算、切片上限、候选阈值           |
+| 长图识别错位   | 岗位字段错配   | 短图拼接 + 长图切片 + 多模态模型 + 证据字段 |
+| 模型成本不可控   | 花费上升     | 每日预算、切片上限、预过滤门控           |
 | 邮箱识别错误      | 投递失败     | 逐字符输出 + 正则 + 不确定复核       |
 | 误推校招/实习     | 干扰用户     | 强排除词 + `article_type` 分类 |
 | 开源依赖上游变动    | 解析层失效    | 适配器 + 自研 BS4 兜底          |
@@ -941,8 +900,7 @@ wehire-monitor/
     raw_html/
     markdown/
     images/
-    ocr/
-    llm_outputs/
+    model_outputs/
     report.html
   src/wehire_monitor/
     cli/
@@ -957,9 +915,7 @@ wehire-monitor/
       notifier/
       storage/
     providers/
-      llm/
-      vlm/
-      ocr/
+      multimodal/
       prompts/
       factory.py
     domain/
@@ -980,6 +936,6 @@ wehire-monitor/
 
 - `wnma3mz/wechat_articles_spider`：URL 获取、token/cookie 维护、限频思路参考（抓取层自研）
 - `bzd6661/wechat-article-for-ai`：URL→Markdown、图片本地化、验证码检测、重试（解析层适配器封装）
-- `RapidAI/RapidOCR`：默认 OCR
-- `PaddlePaddle/PaddleOCR`：高精度备选 OCR
+- 小米 MiMo-V2.5：默认多模态模型，文本+图片统一理解，OpenAI 兼容 API
+- 阿里 Qwen-VL-Max：备选多模态模型，视觉理解 + 文本生成
 - `opendatalab/MinerU`：v1.0 后续复杂排版增强备选

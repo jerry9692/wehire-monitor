@@ -42,7 +42,7 @@ class PrefilterResult:
     """预过滤结果"""
     score: int
     reasons: list[str]
-    decision: Literal["extract", "ocr_review", "ignore"]
+    decision: Literal["extract", "ignore"]
 
 
 @dataclass
@@ -63,9 +63,7 @@ class RunLog:
     ended_at: str | None = None
     fetched_count: int = 0
     candidate_count: int = 0
-    ocr_count: int = 0
-    llm_count: int = 0
-    vlm_count: int = 0
+    model_count: int = 0
     cost_estimate: float = 0.0
     error_summary: str | None = None
 
@@ -112,9 +110,7 @@ class ExtractionResult:
     ]
     jobs: list[Job]
     warnings: list[str]
-    llm_calls: int = 0
-    vlm_calls: int = 0
-    ocr_calls: int = 0
+    model_calls: int = 0
     cost_estimate: float = 0.0   # v0.3: VLM 成本估算(元)
 
 

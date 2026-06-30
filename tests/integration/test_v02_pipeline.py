@@ -43,7 +43,7 @@ def test_full_pipeline_extract_match_with_mock(tmp_db_path, sample_accounts_yaml
             deadline=Deadline(date="2026-07-31", inferred=False),
             source_evidence={}, confidence=85,
         )],
-        warnings=[], llm_calls=1,
+        warnings=[], model_calls=1,
     )
 
     with patch.object(runner.parser, "parse", return_value=parsed), \

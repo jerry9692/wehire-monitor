@@ -50,9 +50,7 @@ CREATE TABLE IF NOT EXISTS run_logs (
   ended_at TEXT,
   fetched_count INTEGER DEFAULT 0,
   candidate_count INTEGER DEFAULT 0,
-  ocr_count INTEGER DEFAULT 0,
-  llm_count INTEGER DEFAULT 0,
-  vlm_count INTEGER DEFAULT 0,
+  model_count INTEGER DEFAULT 0,
   cost_estimate REAL DEFAULT 0,
   error_summary TEXT
 );

@@ -1,23 +1,25 @@
-"""Extractor v0.3 三路切换测试
+"""Extractor v0.3 统一多模态提取测试
 
-三路切换逻辑:
-  正文>=500字 且含岗位/投递信息 → 文本 LLM (路径1)
-  有图片 → OCR → 质量评分:
-    score>=0.72 → OCR文本+原文 → 文本 LLM (路径2a)
-    0.45<=score<0.72 → VLM 复核 (路径2b)
-    score<0.45 或长图 → VLM 切片提取 (路径2c)
+统一多模态架构(v0.3):
+  短图拼接(stitcher) → 长图切片(slicer) → 多模态模型提取
   预算耗尽 → need_review
+  一个模型同时处理文本和图片,不再有 OCR 质量评分与三路切换
 """
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from wehire_monitor.modules.extractor.extractor import Extractor
+from wehire_monitor.providers.multimodal.base import (
+    MultimodalProvider,
+    MultimodalResponse,
+)
 from wehire_monitor.domain.models import (
     ParsedArticle,
     ImageAsset,
     PrefilterResult,
-    ExtractionResult,
     Job,
     Deadline,
+    ImageSlice,
+    SliceMeta,
 )
 
 
@@ -60,222 +62,139 @@ def _make_job(company="德邦证券"):
     )
 
 
-def _mock_vlm_response(jobs=None, success=True):
-    """构造 VLM mock 响应"""
-    resp = MagicMock()
-    resp.success = success
-    resp.article_type = "social_recruitment"
-    resp.jobs = jobs if jobs is not None else [_make_job()]
-    resp.warnings = []
-    resp.cost_estimate = 0.03
-    resp.error = ""
-    return resp
-
-
-def _mock_llm_response(jobs=None, success=True):
-    """构造 LLM mock 响应"""
-    resp = MagicMock()
-    resp.success = success
-    resp.article_type = "social_recruitment"
-    resp.jobs = jobs if jobs is not None else [_make_job()]
-    resp.warnings = []
-    resp.error = ""
-    return resp
-
-
-def _mock_ocr_result():
-    """构造 OCR mock 结果"""
-    return MagicMock(
-        lines=[MagicMock(text="德邦证券招聘", confidence=0.9, box=[0, 0, 100, 30])],
-        full_text="德邦证券招聘 数据分析师 投递 hr@example.com",
+def _make_slice(image_index=0, slice_index=0, y_start=0, y_end=1500,
+                local_path="/tmp/slice.png"):
+    """构造单个 ImageSlice"""
+    return ImageSlice(
+        pil_image=None,
+        local_path=local_path,
+        meta=SliceMeta(
+            image_index=image_index,
+            slice_index=slice_index,
+            y_start=y_start,
+            y_end=y_end,
+            is_bottom=(slice_index == 1),
+        ),
     )
 
 
+def _make_response(jobs=None, success=True, model_calls=1, cost_estimate=0.03):
+    """构造 MultimodalResponse"""
+    return MultimodalResponse(
+        success=success,
+        article_type="social_recruitment",
+        jobs=jobs if jobs is not None else [_make_job()],
+        warnings=[],
+        cost_estimate=cost_estimate,
+        model_calls=model_calls,
+        error="" if success else "API error",
+    )
+
+
+def _make_provider(response=None):
+    """构造带 spec 的 MultimodalProvider mock,extract_jobs 返回指定响应"""
+    provider = Mock(spec=MultimodalProvider)
+    provider.name = "mock-multimodal"
+    provider.model = "mock-model"
+    provider.extract_jobs.return_value = response or _make_response()
+    return provider
+
+
 # ----------------------------------------------------------------------
-# 1. OCR质量<0.45 → VLM 路径(路径2c)
+# 1. 长图触发切片
 # ----------------------------------------------------------------------
-def test_vlm_path_triggered_for_low_ocr_quality():
-    """OCR 质量<0.45 → 走 VLM 切片提取路径"""
+def test_long_image_triggers_slicing():
+    """长图(高度>3000)→ 触发 slicer 切片,多切片传给 provider"""
     article = _make_parsed_article(
         text="短文本",
-        images=[_make_image(height=600)],
+        images=[_make_image(height=4000, local_path="/tmp/long_img.png")],
     )
     pf = PrefilterResult(score=55, reasons=["命中"], decision="extract")
 
-    mock_llm = MagicMock()
-    mock_llm.extract_jobs.return_value = _mock_llm_response()
+    mock_slicer = MagicMock()
+    mock_slicer.slice_image.return_value = [
+        _make_slice(slice_index=0, y_start=0, y_end=1500),
+        _make_slice(slice_index=1, y_start=1280, y_end=4000),
+    ]
 
-    mock_ocr = MagicMock()
-    mock_ocr.ocr.return_value = _mock_ocr_result()
-
-    mock_vlm = MagicMock()
-    mock_vlm.extract_jobs_from_slices.return_value = _mock_vlm_response()
+    response = _make_response(model_calls=1, cost_estimate=0.06)
+    mock_provider = _make_provider(response)
 
     extractor = Extractor(
-        llm_provider=mock_llm, ocr_provider=mock_ocr, vlm_provider=mock_vlm,
+        multimodal_provider=mock_provider, slicer=mock_slicer,
     )
     with patch(
-        "wehire_monitor.modules.extractor.extractor.calculate_ocr_quality",
-        return_value=0.30,
+        "wehire_monitor.modules.extractor.extractor.should_slice_image",
+        return_value=True,
     ):
         result = extractor.extract(article, pf)
 
-    # VLM 被调用, LLM 未被调用
-    assert result.vlm_calls == 1
-    assert result.llm_calls == 0
-    mock_vlm.extract_jobs_from_slices.assert_called_once()
-    mock_llm.extract_jobs.assert_not_called()
-    # 结果包含 VLM 提取的岗位
+    # slicer 被调用,传入长图路径与 image_index
+    mock_slicer.slice_image.assert_called_once_with(
+        "/tmp/long_img.png", image_index=0,
+    )
+    # provider 收到 2 个切片
+    mock_provider.extract_jobs.assert_called_once()
+    _, kwargs = mock_provider.extract_jobs.call_args
+    assert len(kwargs["images"]) == 2
+    # 结果
     assert result.article_type == "social_recruitment"
     assert len(result.jobs) == 1
-    assert result.jobs[0].company_name == "德邦证券"
+    assert result.model_calls == 1
+    assert result.cost_estimate == 0.06
 
 
 # ----------------------------------------------------------------------
-# 2. 预算耗尽 → need_review
+# 2. 预算耗尽 → 跳过模型调用
 # ----------------------------------------------------------------------
-def test_vlm_skipped_when_budget_exhausted():
-    """VLM 预算耗尽 → 标记 need_review,不调用 VLM"""
+def test_budget_exhausted_skips_model():
+    """预算耗尽 → 标记 need_review,不调用 provider"""
     article = _make_parsed_article(
         text="短文本",
         images=[_make_image(height=600)],
     )
     pf = PrefilterResult(score=55, reasons=["命中"], decision="extract")
 
-    mock_llm = MagicMock()
-    mock_ocr = MagicMock()
-    mock_ocr.ocr.return_value = _mock_ocr_result()
-
-    mock_vlm = MagicMock()
-    mock_vlm.extract_jobs_from_slices.return_value = _mock_vlm_response()
-
+    mock_provider = _make_provider()
     mock_budget = MagicMock()
     mock_budget.is_exhausted.return_value = True
 
     extractor = Extractor(
-        llm_provider=mock_llm, ocr_provider=mock_ocr, vlm_provider=mock_vlm,
-        budget_manager=mock_budget,
+        multimodal_provider=mock_provider, budget_manager=mock_budget,
     )
-    with patch(
-        "wehire_monitor.modules.extractor.extractor.calculate_ocr_quality",
-        return_value=0.30,
-    ):
-        result = extractor.extract(article, pf)
+    result = extractor.extract(article, pf)
 
-    # VLM 未被调用, 标记 need_review
-    assert result.vlm_calls == 0
-    assert result.llm_calls == 0
-    mock_vlm.extract_jobs_from_slices.assert_not_called()
+    # provider 未被调用, 标记 need_review
+    mock_provider.extract_jobs.assert_not_called()
+    assert result.model_calls == 0
     assert any("need_review" in w for w in result.warnings)
     assert result.article_type == "unknown"
     assert len(result.jobs) == 0
 
 
 # ----------------------------------------------------------------------
-# 3. 0.45<=quality<0.72 → VLM 复核(路径2b)
+# 3. 文本和图片同时传给 provider
 # ----------------------------------------------------------------------
-def test_medium_quality_uses_vlm_review():
-    """OCR 质量中等(0.45<=score<0.72)→ VLM 复核模式(不切片)"""
+def test_text_and_images_both_passed_to_provider():
+    """有文本且有图片 → 文本和图片切片同时传给 provider"""
     article = _make_parsed_article(
-        text="短文本",
-        images=[_make_image(height=600)],
+        text="德邦证券2026年社会招聘公告,岗位数据分析师,投递 hr@example.com",
+        images=[_make_image(height=600, local_path="/tmp/img.png")],
     )
     pf = PrefilterResult(score=55, reasons=["命中"], decision="extract")
 
-    mock_llm = MagicMock()
-    mock_ocr = MagicMock()
-    mock_ocr.ocr.return_value = _mock_ocr_result()
+    response = _make_response(model_calls=1, cost_estimate=0.05)
+    mock_provider = _make_provider(response)
 
-    mock_vlm = MagicMock()
-    mock_vlm.extract_jobs_from_slices.return_value = _mock_vlm_response()
+    extractor = Extractor(multimodal_provider=mock_provider)
+    result = extractor.extract(article, pf)
 
-    mock_slicer = MagicMock()
-
-    extractor = Extractor(
-        llm_provider=mock_llm, ocr_provider=mock_ocr, vlm_provider=mock_vlm,
-        slicer=mock_slicer,
-    )
-    with patch(
-        "wehire_monitor.modules.extractor.extractor.calculate_ocr_quality",
-        return_value=0.55,
-    ):
-        result = extractor.extract(article, pf)
-
-    # VLM 被调用
-    assert result.vlm_calls == 1
-    mock_vlm.extract_jobs_from_slices.assert_called_once()
-    # 复核模式(force_slice=False)不触发切片
-    mock_slicer.slice_image.assert_not_called()
-    # LLM 未被调用
-    assert result.llm_calls == 0
-
-
-# ----------------------------------------------------------------------
-# 4. quality>=0.72 → 文本 LLM(路径2a,不调VLM)
-# ----------------------------------------------------------------------
-def test_high_quality_uses_text_llm():
-    """OCR 质量>=0.72 → 走文本 LLM 路径,不调用 VLM"""
-    article = _make_parsed_article(
-        text="短文本",
-        images=[_make_image(height=600)],
-    )
-    pf = PrefilterResult(score=55, reasons=["命中"], decision="extract")
-
-    mock_llm = MagicMock()
-    mock_llm.extract_jobs.return_value = _mock_llm_response()
-
-    mock_ocr = MagicMock()
-    mock_ocr.ocr.return_value = _mock_ocr_result()
-
-    mock_vlm = MagicMock()
-    mock_vlm.extract_jobs_from_slices.return_value = _mock_vlm_response()
-
-    extractor = Extractor(
-        llm_provider=mock_llm, ocr_provider=mock_ocr, vlm_provider=mock_vlm,
-    )
-    with patch(
-        "wehire_monitor.modules.extractor.extractor.calculate_ocr_quality",
-        return_value=0.85,
-    ):
-        result = extractor.extract(article, pf)
-
-    # LLM 被调用, VLM 未被调用
-    assert result.llm_calls == 1
-    assert result.vlm_calls == 0
-    mock_llm.extract_jobs.assert_called_once()
-    mock_vlm.extract_jobs_from_slices.assert_not_called()
+    mock_provider.extract_jobs.assert_called_once()
+    _, kwargs = mock_provider.extract_jobs.call_args
+    # 文本和图片都传给了 provider
+    assert kwargs["text"] == article.plain_text
+    assert len(kwargs["images"]) == 1
+    # 结果
     assert result.article_type == "social_recruitment"
-
-
-# ----------------------------------------------------------------------
-# 5. 无VLM provider → 回退文本LLM
-# ----------------------------------------------------------------------
-def test_no_vlm_falls_back_to_text_llm():
-    """中等质量但无 VLM provider → 回退文本 LLM"""
-    article = _make_parsed_article(
-        text="短文本",
-        images=[_make_image(height=600)],
-    )
-    pf = PrefilterResult(score=55, reasons=["命中"], decision="extract")
-
-    mock_llm = MagicMock()
-    mock_llm.extract_jobs.return_value = _mock_llm_response()
-
-    mock_ocr = MagicMock()
-    mock_ocr.ocr.return_value = _mock_ocr_result()
-
-    # 无 VLM provider
-    extractor = Extractor(
-        llm_provider=mock_llm, ocr_provider=mock_ocr, vlm_provider=None,
-    )
-    with patch(
-        "wehire_monitor.modules.extractor.extractor.calculate_ocr_quality",
-        return_value=0.55,
-    ):
-        result = extractor.extract(article, pf)
-
-    # 回退到文本 LLM
-    assert result.llm_calls == 1
-    assert result.vlm_calls == 0
-    mock_llm.extract_jobs.assert_called_once()
-    assert result.article_type == "social_recruitment"
+    assert result.model_calls == 1
+    assert result.cost_estimate == 0.05

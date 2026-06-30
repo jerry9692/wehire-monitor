@@ -8,7 +8,7 @@ def test_budget_initial():
     assert bm.daily_budget == 5.0
     assert bm.max_slices_per_article == 8
     assert bm.remaining == 5.0
-    assert bm.total_vlm_calls == 0
+    assert bm.total_model_calls == 0
     assert bm.total_slices == 0
     assert bm.is_exhausted() is False
     assert bm.slice_limit_reached() is False
@@ -19,12 +19,12 @@ def test_budget_consume():
     bm = BudgetManager(daily_budget_cny=5.0, max_slices_per_article=8)
     bm.consume(1.0, slices=2)
     assert bm.remaining == 4.0
-    assert bm.total_vlm_calls == 1
+    assert bm.total_model_calls == 1
     assert bm.total_slices == 2
 
     bm.consume(0.5, slices=1)
     assert bm.remaining == 3.5
-    assert bm.total_vlm_calls == 2
+    assert bm.total_model_calls == 2
     assert bm.total_slices == 3
 
 
@@ -72,12 +72,12 @@ def test_budget_reset():
     bm = BudgetManager(daily_budget_cny=5.0, max_slices_per_article=8)
     bm.consume(2.0, slices=2)
     assert bm.remaining == 3.0
-    assert bm.total_vlm_calls == 1
+    assert bm.total_model_calls == 1
     assert bm.total_slices == 2
 
     bm.reset()
     assert bm.remaining == 5.0
-    assert bm.total_vlm_calls == 0
+    assert bm.total_model_calls == 0
     assert bm.total_slices == 0
     assert bm.is_exhausted() is False
     assert bm.slice_limit_reached() is False
@@ -91,5 +91,5 @@ def test_budget_summary():
     assert summary["daily_budget"] == 5.0
     assert summary["spent"] == 1.234
     assert summary["remaining"] == round(5.0 - 1.234, 4)
-    assert summary["vlm_calls"] == 1
+    assert summary["model_calls"] == 1
     assert summary["total_slices"] == 2
