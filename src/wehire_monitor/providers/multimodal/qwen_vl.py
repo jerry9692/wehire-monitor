@@ -1,7 +1,7 @@
 """Qwen-VL-Max 多模态 Provider(DashScope OpenAI 兼容接口)
 
 从 ``providers/vlm/qwen_vl.py`` 迁移,适配统一多模态接口。
-保留原有逐切片调用逻辑:每张图片单独调用一次 API,然后合并结果。
+保留原有逐切片调用逻辑:每张图片单独调用一次 API,然后用 merge_slice_jobs 去重合并。
 
 与 MiMo 的单次多图调用不同,Qwen-VL-Max 对招聘长图采用逐切片识别,
 更适合控制单次请求大小与成本。文本部分则单独发起一次调用。
@@ -16,6 +16,7 @@ from wehire_monitor.providers.multimodal.base import MultimodalResponse
 from wehire_monitor.providers.multimodal.openai_compatible import (
     OpenAICompatibleProvider,
 )
+from wehire_monitor.modules.extractor.vlm_merge import merge_slice_jobs
 
 
 class QwenVLProvider(OpenAICompatibleProvider):
@@ -68,6 +69,7 @@ class QwenVLProvider(OpenAICompatibleProvider):
             )
 
         all_jobs: list = []
+        slice_job_lists: list[list] = []  # per-slice job lists for dedup merge
         all_warnings: list[str] = []
         article_type = "unknown"
         total_cost = 0.0
@@ -83,7 +85,7 @@ class QwenVLProvider(OpenAICompatibleProvider):
             total_cost += resp.cost_estimate
             if resp.success:
                 success_count += 1
-                all_jobs.extend(resp.jobs)
+                slice_job_lists.append(resp.jobs)
                 all_warnings.extend(resp.warnings)
                 if resp.article_type and resp.article_type != "unknown":
                     article_type = resp.article_type
@@ -98,13 +100,16 @@ class QwenVLProvider(OpenAICompatibleProvider):
             total_cost += resp.cost_estimate
             if resp.success:
                 success_count += 1
-                all_jobs.extend(resp.jobs)
+                slice_job_lists.append(resp.jobs)
                 all_warnings.extend(resp.warnings)
                 if resp.article_type and resp.article_type != "unknown":
                     article_type = resp.article_type
             else:
                 last_error = resp.error or "unknown error"
                 all_warnings.append(f"图片 {idx} 提取失败: {last_error}")
+
+        # 3) 跨切片去重合并
+        all_jobs = merge_slice_jobs(slice_job_lists) if slice_job_lists else []
 
         return MultimodalResponse(
             success=success_count > 0,

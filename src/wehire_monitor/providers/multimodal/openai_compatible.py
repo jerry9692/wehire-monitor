@@ -129,9 +129,14 @@ class OpenAICompatibleProvider(MultimodalProvider):
     # 子类可覆盖系统提示
     system_prompt: str = _DEFAULT_SYSTEM_PROMPT
 
-    def __init__(self, api_key: str, model: str | None = None) -> None:
+    def __init__(self, api_key: str, model: str | None = None, base_url: str | None = None) -> None:
         if model:
             self.model = model
+        if base_url:
+            self.base_url = base_url
+        # 自动补全 /chat/completions 后缀(兼容传入 base URL 和完整 endpoint 两种方式)
+        if self.base_url and not self.base_url.rstrip("/").endswith("/chat/completions"):
+            self.base_url = self.base_url.rstrip("/") + "/chat/completions"
         if not self.model:
             raise ValueError(f"{type(self).__name__} 未配置 model")
         if not self.base_url:

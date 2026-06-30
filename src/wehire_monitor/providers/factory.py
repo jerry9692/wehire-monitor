@@ -25,23 +25,19 @@ def create_multimodal_provider(provider_name: str | None = None):
 
     if name == "mimo":
         from wehire_monitor.providers.multimodal.mimo import MiMoProvider
-        provider = MiMoProvider(
+        return MiMoProvider(
             api_key=api_key,
-            model=model or "mimo-v2.5",
+            model=model or None,
+            base_url=base_url or None,
         )
-        if base_url:
-            provider.base_url = base_url
-        return provider
 
     if name == "qwen_vl":
         from wehire_monitor.providers.multimodal.qwen_vl import QwenVLProvider
-        provider = QwenVLProvider(
+        return QwenVLProvider(
             api_key=api_key,
-            model=model or "qwen-vl-max",
+            model=model or None,
+            base_url=base_url or None,
         )
-        if base_url:
-            provider.base_url = base_url
-        return provider
 
     if name == "openai":
         from wehire_monitor.providers.multimodal.openai_compatible import (
@@ -50,13 +46,15 @@ def create_multimodal_provider(provider_name: str | None = None):
 
         class _OpenAIProvider(OpenAICompatibleProvider):
             name = "openai"
-            base_url = base_url or "https://api.openai.com/v1/chat/completions"
             input_price = 17.5
             output_price = 70.0
 
+        openai_base = base_url or "https://api.openai.com/v1"
+        openai_model = model or "gpt-4o"
         return _OpenAIProvider(
             api_key=api_key,
-            model=model or "gpt-4o",
+            model=openai_model,
+            base_url=openai_base,
         )
 
     raise ValueError(f"不支持的多模态 Provider: {name}")

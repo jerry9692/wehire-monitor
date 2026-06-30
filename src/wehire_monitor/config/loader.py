@@ -124,19 +124,11 @@ class ConfigLoader:
     def get_dingtalk_webhook(self) -> str:
         return os.environ.get("DINGTALK_WEBHOOK", "").strip()
 
-    def get_llm_config(self) -> dict:
+    def get_multimodal_config(self) -> dict:
+        """获取多模态模型配置"""
         return {
-            "provider": os.environ.get("LLM_PROVIDER", ""),
-            "api_key": os.environ.get("LLM_API_KEY", ""),
-            "model": os.environ.get("LLM_MODEL", ""),
+            "provider": os.environ.get("MULTIMODAL_PROVIDER", "mimo").strip(),
+            "api_key": os.environ.get("MULTIMODAL_API_KEY", "").strip(),
+            "model": os.environ.get("MULTIMODAL_MODEL", "").strip(),
+            "base_url": os.environ.get("MULTIMODAL_BASE_URL", "").strip(),
         }
-
-    def get_vlm_config(self) -> dict:
-        return {
-            "provider": os.environ.get("VLM_PROVIDER", ""),
-            "api_key": os.environ.get("VLM_API_KEY", ""),
-            "model": os.environ.get("VLM_MODEL", ""),
-        }
-
-    def get_ocr_provider(self) -> str:
-        return os.environ.get("OCR_PROVIDER", "").strip()

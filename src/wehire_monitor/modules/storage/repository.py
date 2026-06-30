@@ -90,19 +90,22 @@ class Repository:
             self.conn.commit()
 
         # --- 2. articles: 迁移已废弃的状态值 ---
+        migrated = False
         # ocr_done → candidate(重新走单路提取)
         cursor = self.conn.execute(
             "UPDATE articles SET status = 'candidate' WHERE status = 'ocr_done'"
         )
         if cursor.rowcount > 0:
             logger.info(f"迁移: {cursor.rowcount} 篇 ocr_done → candidate")
+            migrated = True
         # error_ocr → error_llm(统一错误状态)
         cursor = self.conn.execute(
             "UPDATE articles SET status = 'error_llm' WHERE status = 'error_ocr'"
         )
         if cursor.rowcount > 0:
             logger.info(f"迁移: {cursor.rowcount} 篇 error_ocr → error_llm")
-        if cursor.rowcount > 0:
+            migrated = True
+        if migrated:
             self.conn.commit()
 
     def list_tables(self) -> list[str]:

@@ -187,7 +187,7 @@ def extract(
     db: str = typer.Option("data/job_intel.sqlite", help="SQLite 路径"),
     config_dir: str = typer.Option("config", help="配置目录路径"),
 ):
-    """仅执行提取阶段(对 CANDIDATE 状态文章调用 LLM 提取岗位)"""
+    """仅执行提取阶段(对 CANDIDATE 状态文章调用多模态模型提取岗位)"""
     from wehire_monitor.pipeline.runner import PipelineRunner
 
     logger.info("执行提取阶段")

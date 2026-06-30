@@ -23,7 +23,6 @@ from wehire_monitor.modules.extractor.slicer import (
     LONG_IMAGE_THRESHOLD,
 )
 from wehire_monitor.modules.extractor.stitcher import ImageStitcher, StitchedImages
-from wehire_monitor.modules.extractor.vlm_merge import merge_slice_jobs
 
 
 class Extractor:
@@ -57,7 +56,6 @@ class Extractor:
 
         # 2. 短图拼接(微信长图被拆成多张短图时拼回)
         stitched_images = self._stitch_article_images(article)
-        has_images = bool(stitched_images)
         logger.info(
             f"文章 {article.article_id[:8]}: "
             f"正文{len(article.plain_text)}字, "
@@ -117,11 +115,8 @@ class Extractor:
                 cost_estimate=response.cost_estimate,
             )
 
-        # 7. 合并切片结果(多切片时去重)
-        if len(all_slices) > 1:
-            merged_jobs = merge_slice_jobs([response.jobs])
-        else:
-            merged_jobs = response.jobs
+        # 7. 合并切片结果(Provider 内部已处理跨切片去重,此处直接使用)
+        merged_jobs = response.jobs
 
         # 8. 后处理校验
         fallback_date = publish_time[:10] if publish_time else ""

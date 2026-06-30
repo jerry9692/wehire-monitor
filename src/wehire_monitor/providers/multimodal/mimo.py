@@ -27,11 +27,17 @@ class MiMoProvider(OpenAICompatibleProvider):
     input_price = 0.7   # 元/百万 token
     output_price = 2.1  # 元/百万 token
 
-    def __init__(self, api_key: str, model: str | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        model: str | None = None,
+        base_url: str | None = None,
+    ) -> None:
         """初始化 MiMo Provider
 
         Args:
             api_key: 小米 MiMo API Key
             model:   可选,覆盖默认模型名 ``mimo-v2.5``
+            base_url: 可选,覆盖默认 API 端点(支持传入 base URL 或完整 endpoint)
         """
-        super().__init__(api_key, model)
+        super().__init__(api_key, model, base_url)
