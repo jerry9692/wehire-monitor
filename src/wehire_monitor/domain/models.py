@@ -159,3 +159,12 @@ class ImageSlice:
     pil_image: Any | None            # PIL.Image 对象(内存中,可 None 用于测试)
     local_path: str                  # 切片保存的本地路径
     meta: SliceMeta
+
+
+@dataclass
+class LoginResult:
+    """扫码登录结果"""
+    success: bool
+    cookie: str = ""
+    token: str = ""
+    error: str = ""

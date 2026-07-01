@@ -63,7 +63,7 @@ class ConfigLoader:
             return KeywordsConfig()
         return KeywordsConfig(**data)
 
-    def is_cookie_stale(self, max_age_hours: float = 24.0) -> bool:
+    def is_cookie_stale(self, max_age_hours: float = 48.0) -> bool:
         """检测 Cookie 是否过期(超过 max_age_hours 小时)
 
         COOKIE_UPDATED_AT 支持以下格式(均按 Asia/Shanghai 解释,除非显式带时区):
@@ -132,3 +132,55 @@ class ConfigLoader:
             "model": os.environ.get("MULTIMODAL_MODEL", "").strip(),
             "base_url": os.environ.get("MULTIMODAL_BASE_URL", "").strip(),
         }
+
+    def update_env_cookie(self, cookie: str, token: str) -> None:
+        """将新的 Cookie/Token 写入 .env 文件
+
+        同时更新 COOKIE_UPDATED_AT 为当前时间(Asia/Shanghai)。
+
+        Args:
+            cookie: 新的 WECHAT_MP_COOKIE 值
+            token: 新的 WECHAT_MP_TOKEN 值
+        """
+        from zoneinfo import ZoneInfo
+        try:
+            tz = ZoneInfo("Asia/Shanghai")
+        except ImportError:
+            tz = timezone(timedelta(hours=8))
+        now_str = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
+
+        env_path = self.env_path
+        lines: list[str] = []
+        if env_path.exists():
+            lines = env_path.read_text(encoding="utf-8").splitlines()
+
+        updates = {
+            "WECHAT_MP_COOKIE": cookie,
+            "WECHAT_MP_TOKEN": token,
+            "COOKIE_UPDATED_AT": now_str,
+        }
+        found_keys: set[str] = set()
+
+        new_lines: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if "=" in stripped and not stripped.startswith("#"):
+                key = stripped.split("=", 1)[0].strip()
+                if key in updates:
+                    new_lines.append(f"{key}={updates[key]}")
+                    found_keys.add(key)
+                    continue
+            new_lines.append(line)
+
+        # 添加 .env 中缺失的 KEY
+        for key, value in updates.items():
+            if key not in found_keys:
+                new_lines.append(f"{key}={value}")
+
+        env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+        logger.info(f"Cookie/Token 已写入 {env_path}")
+
+        # 同步更新当前进程的环境变量
+        os.environ["WECHAT_MP_COOKIE"] = cookie
+        os.environ["WECHAT_MP_TOKEN"] = token
+        os.environ["COOKIE_UPDATED_AT"] = now_str

@@ -281,14 +281,18 @@ class PipelineRunner:
 
     def _do_fetch(self) -> dict:
         """执行抓取阶段,返回 {articles, fatal, error}"""
-        # Cookie 过期检测(基于时间)
+        # Cookie 过期检测(基于时间) — 优雅降级:跳过抓取但不中断后续阶段
         if self.config_loader.is_cookie_stale():
-            logger.warning("Cookie 已过期,请手动更新!")
+            logger.warning(
+                "Cookie 已过期，跳过抓取阶段。"
+                "请运行 `wehire-monitor login` 重新登录。"
+                "已入库的候选文章仍会继续提取。"
+            )
             self.notifier.send_alert(
                 "Cookie 过期提醒",
-                "WECHAT_MP_COOKIE 已超过 24 小时未更新,请手动更新 Cookie 和 Token 后重试。",
+                "Cookie 已过期，请运行 `wehire-monitor login` 重新登录。",
             )
-            return {"articles": [], "fatal": True, "error": "Cookie expired"}
+            return {"articles": [], "fatal": False, "error": "Cookie expired"}
 
         try:
             self.fetcher = self._init_fetcher()

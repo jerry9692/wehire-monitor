@@ -28,7 +28,7 @@ logger.add(
 
 app = typer.Typer(
     name="wehire-monitor",
-    help="微信公众号招聘情报监控管道 (v0.3)",
+    help="微信公众号招聘情报监控管道 (v0.4)",
     no_args_is_help=True,
 )
 
@@ -144,6 +144,53 @@ def check_cookie(
         else:
             typer.echo("❌ Cookie 无效或已过期,请更新 WECHAT_MP_COOKIE 和 WECHAT_MP_TOKEN", err=True)
             raise typer.Exit(code=1)
+
+
+@app.command()
+def login(
+    config_dir: str = typer.Option("config", help="配置目录路径"),
+    data_dir: str = typer.Option("data", help="数据目录路径"),
+):
+    """扫码登录微信公众号，自动获取 Cookie/Token（v0.4）"""
+    from wehire_monitor.modules.fetcher.wechat_login import WeChatLogin
+    from wehire_monitor.config.loader import ConfigLoader
+
+    logger.info("启动扫码登录...")
+
+    # 确定数据目录绝对路径
+    p = Path(data_dir)
+    cookie_file = str(p if p.is_absolute() else _PROJECT_ROOT / data_dir) + "/wechat_cookie.json"
+
+    wechat_login = WeChatLogin(cookie_file=cookie_file)
+
+    try:
+        # 先检测已有 Cookie 是否有效
+        if wechat_login.is_cookie_valid():
+            typer.echo("✅ 已有 Cookie 有效，无需扫码登录")
+            # 同步写入 .env（确保 .env 与持久化文件一致）
+            loader = ConfigLoader(config_dir=config_dir)
+            loader.update_env_cookie(
+                cookie=wechat_login._cookie,
+                token=wechat_login._token,
+            )
+            raise typer.Exit(code=0)
+
+        # 执行扫码登录
+        result = wechat_login.login()
+
+        if result.success:
+            # 写入 .env
+            loader = ConfigLoader(config_dir=config_dir)
+            loader.update_env_cookie(
+                cookie=result.cookie,
+                token=result.token,
+            )
+            typer.echo(f"✅ 登录成功，Cookie/Token 已写入 .env (token={result.token})")
+        else:
+            typer.echo(f"❌ 登录失败: {result.error}", err=True)
+            raise typer.Exit(code=1)
+    finally:
+        wechat_login.close()
 
 
 @app.command()
